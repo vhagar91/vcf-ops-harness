@@ -111,7 +111,15 @@ def _log_usage(response) -> None:
             prompt_tokens=getattr(usage, "prompt_tokens", None),
             completion_tokens=getattr(usage, "completion_tokens", None),
             total_tokens=getattr(usage, "total_tokens", None),
+            finish_reason=_finish_reason(response),
         )
+
+
+def _finish_reason(response) -> str | None:
+    try:
+        return response.choices[0].finish_reason
+    except (AttributeError, IndexError):
+        return None
 
 
 def _to_openai_messages(history: list[Message], system_prompt: str) -> list[dict]:
@@ -150,12 +158,20 @@ def _to_openai_messages(history: list[Message], system_prompt: str) -> list[dict
     return msgs
 
 
+def _effective_max_tokens(config: LlmConfig) -> int:
+    """Thinking models need headroom for reasoning *and* the answer; if the build
+    ignores /no_think they otherwise get truncated mid-thought. Give them a floor."""
+    if config.is_thinking_model:
+        return max(config.max_output_tokens, 2_048)
+    return config.max_output_tokens
+
+
 def _create(client: AsyncOpenAI, config: LlmConfig, messages: list[dict], tools):
     """Build the completion coroutine factory (re-invoked by with_retry)."""
     kwargs: dict = {
         "model": config.model,
         "messages": messages,
-        "max_tokens": config.max_output_tokens,
+        "max_tokens": _effective_max_tokens(config),
     }
     if tools:
         kwargs["tools"] = tools
@@ -165,6 +181,17 @@ def _create(client: AsyncOpenAI, config: LlmConfig, messages: list[dict], tools)
     if config.provider == "ollama" and config.is_thinking_model:
         kwargs["extra_body"] = {"think": False}
     return lambda: client.chat.completions.create(**kwargs)  # type: ignore[arg-type]
+
+
+def _inject_no_think(messages: list[dict]) -> None:
+    """Append the qwen3 /no_think switch to the latest user turn (more reliably
+    honoured by some Ollama templates than the system prompt alone)."""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            content = m.get("content") or ""
+            if "/no_think" not in content:
+                m["content"] = f"{content} /no_think".strip()
+            break
 
 
 # ---------------------------------------------------------------------------
@@ -188,10 +215,13 @@ async def process_with_llm(
     tools = registry.to_openai_tools()
     sys_prompt = _effective_system_prompt(config)
 
+    truncated = False
     for iteration in range(config.max_tool_iterations):
         messages = _to_openai_messages(
             memory.get_history(channel, thread_ts), sys_prompt
         )
+        if config.is_thinking_model:
+            _inject_no_think(messages)
         info("Calling LLM", model=config.model, iteration=iteration, tool_count=len(tools))
 
         response = await with_retry(
@@ -203,6 +233,13 @@ async def process_with_llm(
             raise RuntimeError("LLM returned no choices")
         msg = response.choices[0].message
         content = _strip_think(msg.content)
+        if _finish_reason(response) == "length":
+            truncated = True
+            warn(
+                "LLM output truncated by token limit before finishing",
+                iteration=iteration,
+                model=config.model,
+            )
 
         # --- Tool calls requested: execute them, then loop with results ---
         if msg.tool_calls:
@@ -252,20 +289,28 @@ async def process_with_llm(
     messages = _to_openai_messages(
         memory.get_history(channel, thread_ts), sys_prompt
     )
-    messages.append(
-        {
-            "role": "user",
-            "content": (
-                "Summarize the results so far for the user in plain, concise text. "
-                "Use only information from the tool results above; do not call any "
-                "tools and do not invent data."
-            ),
-        }
+    nudge = (
+        "Summarize the results so far for the user in plain, concise text. "
+        "Use only information from the tool results above; do not call any "
+        "tools and do not invent data."
     )
+    if config.is_thinking_model:
+        nudge += " /no_think"
+    messages.append({"role": "user", "content": nudge})
+
     final = await with_retry(_create(client, config, messages, None), RetryOptions())
     _log_usage(final)
-    text = _strip_think(final.choices[0].message.content) or (
-        "I wasn't able to produce a response for that. Please try rephrasing your request."
-    )
+    if _finish_reason(final) == "length":
+        truncated = True
+    text = _strip_think(final.choices[0].message.content)
+    if not text:
+        if truncated:
+            text = (
+                "⚠️ The model ran out of its output budget before finishing — it "
+                "spent the tokens reasoning. Increase MAX_OUTPUT_TOKENS, or switch "
+                "to a more capable model (e.g. OPENAI_MODEL=gpt-4o)."
+            )
+        else:
+            text = "I wasn't able to produce a response for that. Please try rephrasing your request."
     memory.append(channel, thread_ts, Message(role="assistant", content=text))
     return text

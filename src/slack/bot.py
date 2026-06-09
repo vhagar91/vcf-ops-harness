@@ -92,8 +92,15 @@ def create_and_start(config: HarnessConfig ,registry: ActionRegistry) -> None:
             finally:
                 loop.close()
         except Exception as exc:
-            error("Pipeline error", error=str(exc))
-            say(text=f"⚠️ An error occurred: {exc}", thread_ts=thread_ts)
+            error("Pipeline error", error=str(exc), type=type(exc).__name__)
+            if "connection" in str(exc).lower():
+                msg = (
+                    "⚠️ Couldn't reach the LLM backend. Check that the model "
+                    "server (Ollama / OpenAI) is running and reachable, then retry."
+                )
+            else:
+                msg = f"⚠️ An error occurred: {exc}"
+            say(text=msg, thread_ts=thread_ts)
 
     # ------------------------------------------------------------------
     # Handle direct messages in a channel (no @-mention)
