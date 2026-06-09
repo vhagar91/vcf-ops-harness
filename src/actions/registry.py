@@ -43,6 +43,17 @@ class ActionRegistry:
             )
         return tools
 
+    def to_anthropic_tools(self) -> list[dict]:
+        """Return registered actions as Anthropic (Claude) tool definitions."""
+        return [
+            {
+                "name": a.name,
+                "description": a.description,
+                "input_schema": a.input_schema,
+            }
+            for a in self._actions.values()
+        ]
+
     async def execute(self, name: str, args: dict) -> ActionResult:
         action = self._actions.get(name)
         if not action:

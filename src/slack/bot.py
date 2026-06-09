@@ -38,6 +38,12 @@ def create_and_start(config: HarnessConfig ,registry: ActionRegistry) -> None:
             base_url=config.ollama_base_url,
             **_common,
         )
+    elif config.llm_provider == "anthropic":
+        llm_config = LlmConfig(
+            api_key=config.anthropic_api_key,
+            model=config.anthropic_model,
+            **_common,
+        )
     else:
         llm_config = LlmConfig(
             api_key=config.openai_api_key,

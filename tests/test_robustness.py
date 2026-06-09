@@ -11,8 +11,11 @@ from src.ai.llm import (
     LlmConfig,
     MAX_TOOL_LIST_ITEMS,
 )
+from src.ai.anthropic_llm import _to_anthropic_messages
 from src.config.types import Message, ToolCall, ActionResult
 from src.memory.memory import ConversationMemory
+from src.actions.registry import ActionRegistry
+from src.actions.builtin.vrops.actions import vrops_actions
 
 
 # --- think-tag stripping (qwen3) ---------------------------------------------
@@ -117,3 +120,47 @@ def test_pruning_keeps_user_turn_boundary():
         )
         for i, m in enumerate(hist)
     )
+
+
+# --- Anthropic (Claude) provider conversion -----------------------------------
+def test_anthropic_tools_use_input_schema():
+    reg = ActionRegistry()
+    for a in vrops_actions:
+        reg.register(a)
+    tools = reg.to_anthropic_tools()
+    assert tools and all({"name", "description", "input_schema"} <= set(t) for t in tools)
+    # Anthropic must NOT have the OpenAI "function" wrapper.
+    assert all("function" not in t and "parameters" not in t for t in tools)
+
+
+def test_anthropic_messages_group_tool_use_and_coalesce_results():
+    history = [
+        Message(role="user", content="check both"),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[
+                ToolCall(id="a", name="vrops_get_alerts", arguments="{}"),
+                ToolCall(id="b", name="vrops_get_resource_health", arguments='{"resource_id":"x"}'),
+            ],
+        ),
+        Message(role="tool", content='{"ok":1}', tool_call_id="a"),
+        Message(role="tool", content='{"ok":2}', tool_call_id="b"),
+    ]
+    msgs = _to_anthropic_messages(history)
+
+    # assistant turn carries both tool_use blocks (no text block, content was empty)
+    assistant = [m for m in msgs if m["role"] == "assistant"]
+    assert len(assistant) == 1
+    tool_use_blocks = [b for b in assistant[0]["content"] if b["type"] == "tool_use"]
+    assert {b["id"] for b in tool_use_blocks} == {"a", "b"}
+    assert tool_use_blocks[1]["input"] == {"resource_id": "x"}  # arguments parsed to dict
+
+    # both tool results coalesced into ONE following user turn
+    result_turns = [
+        m for m in msgs
+        if m["role"] == "user" and isinstance(m["content"], list)
+        and m["content"][0].get("type") == "tool_result"
+    ]
+    assert len(result_turns) == 1
+    assert {b["tool_use_id"] for b in result_turns[0]["content"]} == {"a", "b"}
