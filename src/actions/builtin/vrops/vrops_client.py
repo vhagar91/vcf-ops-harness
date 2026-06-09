@@ -760,7 +760,211 @@ class VropsClient:
             else:
                 logging.error(f"Failed to get monitored NSX-T managers: {response.status_code}")
                 return []
-                
+
         except Exception as e:
             logging.error(f"Error discovering NSX-T managers: {e}")
             return []
+
+    # ----------------------------------------------------------------------
+    # Read API (alerts / health / performance) — used by the LLM tools.
+    # All routed through _request, which re-authenticates once on a 401 so a
+    # long-running bot self-heals when the token expires.
+    # ----------------------------------------------------------------------
+    def _request(self, method: str, path: str, **kwargs) -> requests.Response:
+        """Send an authenticated request; re-auth once on 401 and retry."""
+        url = f"{self.base_url}{path}"
+        headers = kwargs.pop("headers", {}) or {}
+        headers.setdefault("Accept", "application/json")
+        headers["Authorization"] = f"vRealizeOpsToken {self.token}"
+        kwargs.setdefault("verify", False)
+        kwargs.setdefault("timeout", 30)
+
+        resp = self.session.request(method, url, headers=headers, **kwargs)
+        if resp.status_code == 401:
+            logging.info("vROps token expired/invalid; re-authenticating")
+            if self.authenticate():
+                headers["Authorization"] = f"vRealizeOpsToken {self.token}"
+                resp = self.session.request(method, url, headers=headers, **kwargs)
+        return resp
+
+    def search_resources(self, name: str, resource_kind: Optional[str] = None,
+                         adapter_kind: Optional[str] = None,
+                         page_size: int = 50) -> List[Dict[str, Any]]:
+        """Find resources by (partial) name. Returns all matches, not just the first."""
+        params: Dict[str, Any] = {"name": name, "pageSize": page_size}
+        if resource_kind:
+            params["resourceKind"] = resource_kind
+        if adapter_kind:
+            params["adapterKind"] = adapter_kind
+        try:
+            resp = self._request("GET", "/resources", params=params)
+            if resp.status_code != 200:
+                logging.error(f"search_resources failed: {resp.status_code}")
+                return []
+            out = []
+            for r in resp.json().get("resourceList", []):
+                rk = r.get("resourceKey", {})
+                out.append({
+                    "identifier": r.get("identifier"),
+                    "name": rk.get("name"),
+                    "resourceKind": rk.get("resourceKindKey"),
+                    "adapterKind": rk.get("adapterKindKey"),
+                    "health": r.get("resourceHealth"),
+                    "healthValue": r.get("resourceHealthValue"),
+                })
+            return out
+        except Exception as e:
+            logging.error(f"Error searching resources '{name}': {e}")
+            return []
+
+    def get_resource_health(self, resource_id: str) -> Optional[Dict[str, Any]]:
+        """Get health/state for a resource."""
+        try:
+            resp = self._request("GET", f"/resources/{resource_id}")
+            if resp.status_code != 200:
+                logging.error(f"get_resource_health failed: {resp.status_code}")
+                return None
+            r = resp.json()
+            rk = r.get("resourceKey", {})
+            states = [
+                {
+                    "adapterInstanceId": s.get("adapterInstanceId"),
+                    "resourceStatus": s.get("resourceStatus"),
+                    "resourceState": s.get("resourceState"),
+                    "statusMessage": s.get("statusMessage"),
+                }
+                for s in r.get("resourceStatusStates", [])
+            ]
+            return {
+                "identifier": r.get("identifier"),
+                "name": rk.get("name"),
+                "resourceKind": rk.get("resourceKindKey"),
+                "health": r.get("resourceHealth"),
+                "healthValue": r.get("resourceHealthValue"),
+                "states": states,
+            }
+        except Exception as e:
+            logging.error(f"Error getting health for {resource_id}: {e}")
+            return None
+
+    def get_alerts(self, resource_id: Optional[str] = None,
+                   criticality: Optional[str] = None,
+                   active_only: bool = True,
+                   page_size: int = 100) -> List[Dict[str, Any]]:
+        """List alerts, optionally filtered by resource and/or criticality."""
+        params: Dict[str, Any] = {
+            "page": 0,
+            "pageSize": page_size,
+            "activeOnly": str(active_only).lower(),
+        }
+        if resource_id:
+            params["resourceId"] = resource_id
+        if criticality:
+            params["alertCriticality"] = criticality
+        try:
+            resp = self._request("GET", "/alerts", params=params)
+            if resp.status_code != 200:
+                logging.error(f"get_alerts failed: {resp.status_code}")
+                return []
+            out = []
+            for a in resp.json().get("alerts", []):
+                out.append({
+                    "alertId": a.get("alertId"),
+                    "name": a.get("alertDefinitionName"),
+                    "level": a.get("alertLevel"),
+                    "status": a.get("status"),
+                    "resourceId": a.get("resourceId"),
+                    "startTimeUTC": a.get("startTimeUTC"),
+                    "impact": a.get("alertImpact") or a.get("impact"),
+                })
+            return out
+        except Exception as e:
+            logging.error(f"Error getting alerts: {e}")
+            return []
+
+    def get_alert(self, alert_id: str) -> Optional[Dict[str, Any]]:
+        """Get full detail for a single alert."""
+        try:
+            resp = self._request("GET", f"/alerts/{alert_id}")
+            if resp.status_code != 200:
+                logging.error(f"get_alert failed: {resp.status_code}")
+                return None
+            return resp.json()
+        except Exception as e:
+            logging.error(f"Error getting alert {alert_id}: {e}")
+            return None
+
+    def get_stat_keys(self, resource_id: str) -> List[str]:
+        """Discover the metric (stat) keys available for a resource."""
+        try:
+            resp = self._request("GET", f"/resources/{resource_id}/statkeys")
+            if resp.status_code != 200:
+                logging.error(f"get_stat_keys failed: {resp.status_code}")
+                return []
+            data = resp.json()
+            keys = data.get("stat-key") or data.get("statKeys") or []
+            return [k.get("key") for k in keys if isinstance(k, dict) and k.get("key")]
+        except Exception as e:
+            logging.error(f"Error getting stat keys for {resource_id}: {e}")
+            return []
+
+    def get_latest_stats(self, resource_id: str,
+                         stat_keys: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Get the most recent value for each requested metric (or all)."""
+        params: Dict[str, Any] = {}
+        if stat_keys:
+            params["statKey"] = stat_keys  # requests encodes list as repeated params
+        try:
+            resp = self._request("GET", f"/resources/{resource_id}/stats/latest", params=params)
+            if resp.status_code != 200:
+                logging.error(f"get_latest_stats failed: {resp.status_code}")
+                return {}
+            out: Dict[str, Any] = {}
+            for v in resp.json().get("values", []):
+                for stat in v.get("stat-list", {}).get("stat", []):
+                    key = stat.get("statKey", {}).get("key")
+                    data = stat.get("data") or []
+                    if key and data:
+                        out[key] = data[-1]
+            return out
+        except Exception as e:
+            logging.error(f"Error getting latest stats for {resource_id}: {e}")
+            return {}
+
+    def get_stats(self, resource_id: str, stat_keys: List[str],
+                  hours_back: float = 6.0, rollup: str = "AVG",
+                  interval: str = "MINUTES", interval_qty: int = 5) -> Dict[str, Any]:
+        """Get a time-series for metrics, returned as a compact summary
+        (count/latest/min/max/avg) rather than every raw data point."""
+        end = int(time.time() * 1000)
+        begin = end - int(hours_back * 3600 * 1000)
+        params: Dict[str, Any] = {
+            "statKey": stat_keys,
+            "begin": begin,
+            "end": end,
+            "rollUpType": rollup,
+            "intervalType": interval,
+            "intervalQuantifier": interval_qty,
+        }
+        try:
+            resp = self._request("GET", f"/resources/{resource_id}/stats", params=params)
+            if resp.status_code != 200:
+                logging.error(f"get_stats failed: {resp.status_code}")
+                return {}
+            summary: Dict[str, Any] = {}
+            for v in resp.json().get("values", []):
+                for stat in v.get("stat-list", {}).get("stat", []):
+                    key = stat.get("statKey", {}).get("key")
+                    data = [d for d in (stat.get("data") or []) if d is not None]
+                    if key and data:
+                        summary[key] = {
+                            "count": len(data),
+                            "latest": data[-1],
+                            "min": min(data),
+                            "max": max(data),
+                            "avg": round(sum(data) / len(data), 3),
+                        }
+            return summary
+        except Exception as e:
+            logging.error(f"Error getting stats for {resource_id}: {e}")
+            return {}

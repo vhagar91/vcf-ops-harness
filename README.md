@@ -112,9 +112,46 @@ registry.register(my_action)
 | `SLACK_PORT`             | ❌       | `3000`    | Port for HTTP mode                   |
 | `OPENAI_API_KEY`         | ✅       | —         | OpenAI API key                       |
 | `OPENAI_MODEL`           | ❌       | `gpt-4o`  | OpenAI model ID                      |
-| `SYSTEM_PROMPT`          | ❌       | (default) | System prompt for the assistant      |
+| `SYSTEM_PROMPT`          | ❌       | (grounding default) | System prompt for the assistant |
 | `MAX_CONVERSATION_TURNS` | ❌       | `50`      | Max messages kept per conversation   |
+| `MAX_OUTPUT_TOKENS`      | ❌       | `800`     | Max tokens generated per reply       |
+| `REQUEST_TIMEOUT_S`      | ❌       | `60`      | Per-request LLM timeout (seconds)    |
+| `MAX_TOOL_ITERATIONS`    | ❌       | `5`       | Max tool-call rounds per message     |
+| `IS_THINKING_MODEL`      | ❌       | `auto`    | `auto`/`true`/`false` — strip `<think>` blocks (qwen3) |
+| `VROPS_SERVER`           | ❌       | —         | vROps server FQDN/IP (for vROps tools) |
+| `VROPS_USERNAME`         | ❌       | —         | vROps username                       |
+| `VROPS_PASSWORD`         | ❌       | —         | vROps password                       |
+| `VROPS_AUTH_SOURCE`      | ❌       | `Local`   | vROps auth source                    |
 | `LOG_LEVEL`              | ❌       | `INFO`    | `DEBUG`, `INFO`, `WARN`, `ERROR`     |
+
+## How responses are generated
+
+Each user message runs a **bounded agentic loop** (up to `MAX_TOOL_ITERATIONS`
+rounds): the model may chain tool calls — e.g. `vrops_search_resources` → get an
+ID → `vrops_get_latest_stats` — before producing a final, grounded answer. Tool
+output is size-capped before re-entering the context, replies are capped at
+`MAX_OUTPUT_TOKENS`, and `<think>` blocks from thinking models are stripped. The
+default system prompt instructs the model to answer **only** from tool data.
+
+## vROps tools
+
+Read (health / alerts / performance):
+
+| Tool | Purpose |
+|------|---------|
+| `vrops_search_resources`     | Find resources by name; returns all matches + IDs + health |
+| `vrops_get_resource_health`  | Health (GREEN/YELLOW/ORANGE/RED) + status states |
+| `vrops_get_alerts`           | Active alerts, filterable by resource and criticality |
+| `vrops_get_alert`            | Full detail for one alert |
+| `vrops_get_stat_keys`        | Discover available metric keys for a resource |
+| `vrops_get_latest_stats`     | Most recent metric values ("current CPU usage") |
+| `vrops_get_stats`            | Time-series summary (count/latest/min/max/avg) over a window |
+
+Plus the original write/admin tools: `vrops_find_resource`,
+`vrops_get_resource_properties`, `vrops_create_resource`, `vrops_push_properties`,
+`vrops_push_event`, `vrops_get_monitored_vcenters`,
+`vrops_get_monitored_nsxt_managers`, `vrops_add_child_relationship`,
+`vrops_get_version`.
 
 ## Running
 

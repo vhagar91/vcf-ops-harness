@@ -35,11 +35,31 @@ class ConversationMemory:
         conv = self._store.setdefault(k, [])
         conv.append(message)
 
-        # Prune oldest non-system messages when over budget
         if len(conv) > self._max_turns:
-            system_msgs = [m for m in conv if m.role == "system"]
-            tail = conv[-(self._max_turns - len(system_msgs)) :]
-            self._store[k] = system_msgs + tail
+            self._store[k] = self._prune(conv)
+
+    def _prune(self, conv: list[Message]) -> list[Message]:
+        """Trim history to ``max_turns`` without orphaning tool messages.
+
+        The kept window must begin at a ``user`` message so we never drop an
+        assistant ``tool_calls`` message while keeping its ``tool`` replies
+        (which the OpenAI API rejects with a 400).
+        """
+        system_msgs = [m for m in conv if m.role == "system"]
+        non_system = [m for m in conv if m.role != "system"]
+
+        keep = max(1, self._max_turns - len(system_msgs))
+        window = non_system[-keep:]
+
+        # Advance to the first clean turn boundary (a user message).
+        for i, m in enumerate(window):
+            if m.role == "user":
+                window = window[i:]
+                break
+        else:
+            window = []  # no user turn in window; drop dangling fragments
+
+        return system_msgs + window
 
     def get_history(self, channel: str, thread_ts: str | None) -> list[Message]:
         return self._store.get(self._key(channel, thread_ts), [])

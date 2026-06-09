@@ -213,6 +213,128 @@ async def _vrops_add_child_relationship(args: dict) -> ActionResult:
 
 
 # ---------------------------------------------------------------------------
+# Read actions: alerts / health / performance (what users actually ask for)
+# ---------------------------------------------------------------------------
+
+async def _vrops_search_resources(args: dict) -> ActionResult:
+    try:
+        client = _build_client(args)
+        matches = client.search_resources(
+            name=args.get("name", ""),
+            resource_kind=args.get("resource_kind"),
+            adapter_kind=args.get("adapter_kind"),
+        )
+        if not matches:
+            return ActionResult(success=True, summary=f"No resources match '{args.get('name')}'", raw=[])
+        names = ", ".join(f"{m['name']} ({m['resourceKind']})" for m in matches[:10])
+        return ActionResult(
+            success=True,
+            summary=f"Found {len(matches)} resource(s): {names}",
+            raw=matches,
+        )
+    except Exception as e:
+        return ActionResult(success=False, summary=str(e))
+
+
+async def _vrops_get_resource_health(args: dict) -> ActionResult:
+    try:
+        client = _build_client(args)
+        health = client.get_resource_health(args.get("resource_id", ""))
+        if health:
+            return ActionResult(
+                success=True,
+                summary=f"{health.get('name')} health: {health.get('health')} "
+                        f"(value {health.get('healthValue')})",
+                raw=health,
+            )
+        return ActionResult(success=False, summary=f"No health data for resource {args.get('resource_id')}")
+    except Exception as e:
+        return ActionResult(success=False, summary=str(e))
+
+
+async def _vrops_get_alerts(args: dict) -> ActionResult:
+    try:
+        client = _build_client(args)
+        alerts = client.get_alerts(
+            resource_id=args.get("resource_id"),
+            criticality=args.get("criticality"),
+            active_only=args.get("active_only", True),
+        )
+        return ActionResult(
+            success=True,
+            summary=f"Found {len(alerts)} alert(s)",
+            raw=alerts,
+        )
+    except Exception as e:
+        return ActionResult(success=False, summary=str(e))
+
+
+async def _vrops_get_alert(args: dict) -> ActionResult:
+    try:
+        client = _build_client(args)
+        alert = client.get_alert(args.get("alert_id", ""))
+        if alert:
+            return ActionResult(success=True, summary=f"Alert {args.get('alert_id')} detail", raw=alert)
+        return ActionResult(success=False, summary=f"Alert {args.get('alert_id')} not found")
+    except Exception as e:
+        return ActionResult(success=False, summary=str(e))
+
+
+async def _vrops_get_stat_keys(args: dict) -> ActionResult:
+    try:
+        client = _build_client(args)
+        keys = client.get_stat_keys(args.get("resource_id", ""))
+        return ActionResult(
+            success=True,
+            summary=f"{len(keys)} metric key(s) available",
+            raw=keys,
+        )
+    except Exception as e:
+        return ActionResult(success=False, summary=str(e))
+
+
+async def _vrops_get_latest_stats(args: dict) -> ActionResult:
+    try:
+        client = _build_client(args)
+        stats = client.get_latest_stats(
+            resource_id=args.get("resource_id", ""),
+            stat_keys=args.get("stat_keys"),
+        )
+        if not stats:
+            return ActionResult(success=True, summary="No current metric values returned", raw={})
+        return ActionResult(
+            success=True,
+            summary=f"Latest values for {len(stats)} metric(s)",
+            raw=stats,
+        )
+    except Exception as e:
+        return ActionResult(success=False, summary=str(e))
+
+
+async def _vrops_get_stats(args: dict) -> ActionResult:
+    try:
+        client = _build_client(args)
+        stat_keys = args.get("stat_keys") or []
+        if not stat_keys:
+            return ActionResult(success=False, summary="stat_keys is required (use vrops_get_stat_keys to discover them)")
+        summary = client.get_stats(
+            resource_id=args.get("resource_id", ""),
+            stat_keys=stat_keys,
+            hours_back=args.get("hours_back", 6),
+            rollup=args.get("rollup", "AVG"),
+        )
+        if not summary:
+            return ActionResult(success=True, summary="No metric data in the requested window", raw={})
+        return ActionResult(
+            success=True,
+            summary=f"Time-series summary for {len(summary)} metric(s) over {args.get('hours_back', 6)}h",
+            raw=summary,
+        )
+    except Exception as e:
+        return ActionResult(success=False, summary=str(e))
+
+
+# ---------------------------------------------------------------------------
 # Public registry of all vROps actions
 # ---------------------------------------------------------------------------
 
@@ -337,5 +459,129 @@ vrops_actions: list[ActionDefinition] = [
             "required": ["parent_id", "child_id"],
         },
         handler=_vrops_add_child_relationship,
+    ),
+    # --- Read: alerts / health / performance ---
+    ActionDefinition(
+        name="vrops_search_resources",
+        description=(
+            "Search vROps resources by (partial) name. Returns ALL matches with "
+            "their resource IDs, kind, and current health. Use this first to get "
+            "the resource_id needed by the health/stats/alerts tools."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Resource name or substring to search for"},
+                "resource_kind": {"type": "string", "description": "Optional filter, e.g. HostSystem, VirtualMachine, Datastore, ClusterComputeResource"},
+                "adapter_kind": {"type": "string", "description": "Optional adapter filter, e.g. VMWARE"},
+            },
+            "required": ["name"],
+        },
+        handler=_vrops_search_resources,
+    ),
+    ActionDefinition(
+        name="vrops_get_resource_health",
+        description="Get the current health (GREEN/YELLOW/ORANGE/RED), health value (0-100), and status states for a resource by ID.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "resource_id": {"type": "string", "description": "vROps resource identifier"},
+            },
+            "required": ["resource_id"],
+        },
+        handler=_vrops_get_resource_health,
+    ),
+    ActionDefinition(
+        name="vrops_get_alerts",
+        description=(
+            "List active alerts. Optionally filter by resource_id and/or "
+            "criticality. Returns alert name, level, status, and triggering resource."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "resource_id": {"type": "string", "description": "Optional: only alerts for this resource"},
+                "criticality": {
+                    "type": "string",
+                    "description": "Optional severity filter",
+                    "enum": ["INFO", "WARNING", "IMMEDIATE", "CRITICAL"],
+                },
+                "active_only": {"type": "boolean", "description": "Only active (uncancelled) alerts", "default": True},
+            },
+        },
+        handler=_vrops_get_alerts,
+    ),
+    ActionDefinition(
+        name="vrops_get_alert",
+        description="Get full detail for a single alert by its alert ID.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "alert_id": {"type": "string", "description": "Alert identifier"},
+            },
+            "required": ["alert_id"],
+        },
+        handler=_vrops_get_alert,
+    ),
+    ActionDefinition(
+        name="vrops_get_stat_keys",
+        description=(
+            "Discover which performance metric (stat) keys are available for a "
+            "resource, e.g. 'cpu|usage_average', 'mem|usage_average'. Use this "
+            "when you don't know the exact key needed for vrops_get_stats."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "resource_id": {"type": "string", "description": "vROps resource identifier"},
+            },
+            "required": ["resource_id"],
+        },
+        handler=_vrops_get_stat_keys,
+    ),
+    ActionDefinition(
+        name="vrops_get_latest_stats",
+        description="Get the most recent value of one or more performance metrics for a resource. Best for 'current CPU/memory usage' style questions.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "resource_id": {"type": "string", "description": "vROps resource identifier"},
+                "stat_keys": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Metric keys to fetch, e.g. ['cpu|usage_average','mem|usage_average']. Omit for all.",
+                },
+            },
+            "required": ["resource_id"],
+        },
+        handler=_vrops_get_latest_stats,
+    ),
+    ActionDefinition(
+        name="vrops_get_stats",
+        description=(
+            "Get a time-series summary (count/latest/min/max/avg) for performance "
+            "metrics over a recent window. Best for trend / 'over the last N hours' "
+            "questions."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "resource_id": {"type": "string", "description": "vROps resource identifier"},
+                "stat_keys": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Metric keys, e.g. ['cpu|usage_average']",
+                },
+                "hours_back": {"type": "number", "description": "How many hours back to look", "default": 6},
+                "rollup": {
+                    "type": "string",
+                    "description": "Roll-up function",
+                    "enum": ["AVG", "MAX", "MIN", "SUM", "LATEST"],
+                    "default": "AVG",
+                },
+            },
+            "required": ["resource_id", "stat_keys"],
+        },
+        handler=_vrops_get_stats,
     ),
 ]
