@@ -24,6 +24,7 @@ def create_and_start(config: HarnessConfig ,registry: ActionRegistry) -> None:
     memory = ConversationMemory(max_turns=config.max_conversation_turns)
 
     _common = dict(
+        provider=config.llm_provider,
         system_prompt=config.system_prompt,
         is_thinking_model=config.is_thinking_model,
         max_output_tokens=config.max_output_tokens,

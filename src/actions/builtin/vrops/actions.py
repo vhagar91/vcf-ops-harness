@@ -541,7 +541,13 @@ vrops_actions: list[ActionDefinition] = [
     ),
     ActionDefinition(
         name="vrops_get_latest_stats",
-        description="Get the most recent value of one or more performance metrics for a resource. Best for 'current CPU/memory usage' style questions.",
+        description=(
+            "Get the most recent value of performance metrics for a resource. Use "
+            "this for any 'resource consumption / utilization / current usage' "
+            "question. Common keys: cpu|usage_average (CPU %), mem|usage_average "
+            "(memory %), mem|consumed_average (KB), disk|usage_average (KBps), "
+            "net|usage_average (KBps)."
+        ),
         input_schema={
             "type": "object",
             "properties": {
@@ -549,7 +555,7 @@ vrops_actions: list[ActionDefinition] = [
                 "stat_keys": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Metric keys to fetch, e.g. ['cpu|usage_average','mem|usage_average']. Omit for all.",
+                    "description": "Metric keys to fetch, e.g. ['cpu|usage_average','mem|usage_average','disk|usage_average']. Omit to get all available metrics.",
                 },
             },
             "required": ["resource_id"],

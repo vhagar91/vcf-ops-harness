@@ -36,6 +36,7 @@ class LlmConfig:
     api_key: str
     model: str
     system_prompt: str
+    provider: str = "openai"
     base_url: str | None = None
     is_thinking_model: bool = False
     max_output_tokens: int = 800
@@ -47,17 +48,43 @@ class LlmConfig:
 # Helpers
 # ---------------------------------------------------------------------------
 def _strip_think(text: str | None) -> str:
-    """Remove <think>...</think> reasoning blocks emitted by qwen3-style models."""
+    """Remove <think>...</think> reasoning emitted by qwen3-style models.
+
+    Handles both closed blocks and an *unterminated* opening tag (which happens
+    when the model is truncated by the token cap mid-thought) — in that case
+    everything from ``<think>`` onward is reasoning, not an answer.
+    """
     if not text:
         return ""
-    return _THINK_RE.sub("", text).strip()
+    cleaned = _THINK_RE.sub("", text)
+    open_idx = cleaned.lower().find("<think>")
+    if open_idx != -1:
+        cleaned = cleaned[:open_idx]
+    return cleaned.strip()
+
+
+def _effective_system_prompt(config: LlmConfig) -> str:
+    """For thinking models, disable chain-of-thought so the token budget is
+    spent on the answer, not on reasoning that gets truncated. qwen3 honours the
+    ``/no_think`` soft switch placed in the system prompt."""
+    if config.is_thinking_model:
+        return f"{config.system_prompt}\n\n/no_think"
+    return config.system_prompt
 
 
 def _bound_raw(raw):
-    """Cap large list payloads before they re-enter the context window."""
+    """Cap large list/dict payloads before they re-enter the context window."""
     if isinstance(raw, list) and len(raw) > MAX_TOOL_LIST_ITEMS:
         kept = raw[:MAX_TOOL_LIST_ITEMS]
         return kept + [f"...(+{len(raw) - MAX_TOOL_LIST_ITEMS} more, ask to narrow the query)"]
+    if isinstance(raw, dict) and len(raw) > MAX_TOOL_LIST_ITEMS:
+        items = list(raw.items())[:MAX_TOOL_LIST_ITEMS]
+        bounded = dict(items)
+        bounded["__truncated__"] = (
+            f"+{len(raw) - MAX_TOOL_LIST_ITEMS} more keys; request specific "
+            "stat_keys to narrow"
+        )
+        return bounded
     return raw
 
 
@@ -133,6 +160,10 @@ def _create(client: AsyncOpenAI, config: LlmConfig, messages: list[dict], tools)
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
+    # Belt-and-suspenders for Ollama thinking models: also disable thinking via
+    # the native API flag (the /no_think prompt switch is the primary mechanism).
+    if config.provider == "ollama" and config.is_thinking_model:
+        kwargs["extra_body"] = {"think": False}
     return lambda: client.chat.completions.create(**kwargs)  # type: ignore[arg-type]
 
 
@@ -155,10 +186,11 @@ async def process_with_llm(
 
     memory.append(channel, thread_ts, Message(role="user", content=user_message))
     tools = registry.to_openai_tools()
+    sys_prompt = _effective_system_prompt(config)
 
     for iteration in range(config.max_tool_iterations):
         messages = _to_openai_messages(
-            memory.get_history(channel, thread_ts), config.system_prompt
+            memory.get_history(channel, thread_ts), sys_prompt
         )
         info("Calling LLM", model=config.model, iteration=iteration, tool_count=len(tools))
 
@@ -218,7 +250,7 @@ async def process_with_llm(
 
     # --- Forced final summarization (iterations exhausted or empty content) ---
     messages = _to_openai_messages(
-        memory.get_history(channel, thread_ts), config.system_prompt
+        memory.get_history(channel, thread_ts), sys_prompt
     )
     messages.append(
         {

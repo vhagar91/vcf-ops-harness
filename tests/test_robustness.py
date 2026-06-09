@@ -7,6 +7,8 @@ from src.ai.llm import (
     _bound_raw,
     _format_tool_result,
     _to_openai_messages,
+    _effective_system_prompt,
+    LlmConfig,
     MAX_TOOL_LIST_ITEMS,
 )
 from src.config.types import Message, ToolCall, ActionResult
@@ -28,6 +30,20 @@ def test_strip_think_handles_none_and_empty():
     assert _strip_think("") == ""
 
 
+def test_strip_think_drops_truncated_unclosed_block():
+    # Model hit the token cap mid-thought: opening tag, no close, no answer.
+    assert _strip_think("Answer first.<think>reasoning cut off") == "Answer first."
+    assert _strip_think("<think>only reasoning, truncated") == ""
+
+
+def test_effective_system_prompt_disables_thinking_for_thinking_models():
+    cfg = LlmConfig(api_key="x", model="qwen3:4b", system_prompt="base", is_thinking_model=True)
+    assert "/no_think" in _effective_system_prompt(cfg)
+
+    cfg2 = LlmConfig(api_key="x", model="gpt-4o", system_prompt="base", is_thinking_model=False)
+    assert _effective_system_prompt(cfg2) == "base"
+
+
 # --- tool-output bounding / truncation ---------------------------------------
 def test_bound_raw_caps_long_lists():
     raw = list(range(100))
@@ -39,6 +55,13 @@ def test_bound_raw_caps_long_lists():
 def test_bound_raw_passes_small_payloads():
     assert _bound_raw({"a": 1}) == {"a": 1}
     assert _bound_raw([1, 2, 3]) == [1, 2, 3]
+
+
+def test_bound_raw_caps_large_dicts():
+    raw = {f"k{i}": i for i in range(100)}
+    bounded = _bound_raw(raw)
+    assert len(bounded) == MAX_TOOL_LIST_ITEMS + 1  # +1 for the __truncated__ marker
+    assert "__truncated__" in bounded
 
 
 def test_format_tool_result_truncates_huge_payload():
