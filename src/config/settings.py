@@ -49,7 +49,11 @@ class HarnessConfig:
     ollama_base_url: str = "http://localhost:11434/v1"
     ollama_model: str = "llama3"
 
-    # Which LLM provider to use: "openai" or "ollama"
+    # Anthropic / Claude (used when llm_provider == "anthropic")
+    anthropic_api_key: str = ""
+    anthropic_model: str = "claude-opus-4-8"
+
+    # Which LLM provider to use: "openai" | "ollama" | "anthropic"
     llm_provider: str = "openai"
 
     # Optional Slack fields
@@ -100,7 +104,11 @@ def load_config() -> HarnessConfig:
     provider = os.environ.get("LLM_PROVIDER", "openai").lower()
     openai_model = os.environ.get("OPENAI_MODEL", "gpt-4o")
     ollama_model = os.environ.get("OLLAMA_MODEL", "llama3")
-    active_model = ollama_model if provider == "ollama" else openai_model
+    anthropic_model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
+    active_model = {
+        "ollama": ollama_model,
+        "anthropic": anthropic_model,
+    }.get(provider, openai_model)
 
     return HarnessConfig(
         slack_bot_token=_required("SLACK_BOT_TOKEN"),
@@ -112,6 +120,8 @@ def load_config() -> HarnessConfig:
         openai_model=openai_model,
         ollama_base_url=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
         ollama_model=ollama_model,
+        anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
+        anthropic_model=anthropic_model,
         vrops_server=os.environ.get("VROPS_SERVER", ""),
         vrops_username=os.environ.get("VROPS_USERNAME", ""),
         vrops_password=os.environ.get("VROPS_PASSWORD", ""),

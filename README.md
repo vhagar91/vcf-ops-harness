@@ -110,8 +110,11 @@ registry.register(my_action)
 | `SLACK_SIGNING_SECRET`   | ✅       | —         | Slack signing secret                 |
 | `SLACK_APP_TOKEN`        | ❌       | —         | Socket mode token (`xapp-*`)         |
 | `SLACK_PORT`             | ❌       | `3000`    | Port for HTTP mode                   |
-| `OPENAI_API_KEY`         | ✅       | —         | OpenAI API key                       |
+| `LLM_PROVIDER`           | ❌       | `openai`  | `openai`, `ollama`, or `anthropic`   |
+| `OPENAI_API_KEY`         | ✅*      | —         | OpenAI API key (*if provider=openai) |
 | `OPENAI_MODEL`           | ❌       | `gpt-4o`  | OpenAI model ID                      |
+| `ANTHROPIC_API_KEY`      | ✅*      | —         | Anthropic API key (*if provider=anthropic) |
+| `ANTHROPIC_MODEL`        | ❌       | `claude-opus-4-8` | Claude model ID              |
 | `SYSTEM_PROMPT`          | ❌       | (grounding default) | System prompt for the assistant |
 | `MAX_CONVERSATION_TURNS` | ❌       | `50`      | Max messages kept per conversation   |
 | `MAX_OUTPUT_TOKENS`      | ❌       | `800`     | Max tokens generated per reply       |
@@ -123,6 +126,21 @@ registry.register(my_action)
 | `VROPS_PASSWORD`         | ❌       | —         | vROps password                       |
 | `VROPS_AUTH_SOURCE`      | ❌       | `Local`   | vROps auth source                    |
 | `LOG_LEVEL`              | ❌       | `INFO`    | `DEBUG`, `INFO`, `WARN`, `ERROR`     |
+
+## LLM providers
+
+The harness supports three providers, selected via `LLM_PROVIDER`:
+
+| Provider | `LLM_PROVIDER` | SDK | Notes |
+|----------|----------------|-----|-------|
+| OpenAI   | `openai`       | `openai` | e.g. `gpt-4o` |
+| Ollama (local) | `ollama` | `openai` (compat endpoint) | e.g. `qwen3:4b`; thinking auto-disabled |
+| Anthropic / Claude | `anthropic` | `anthropic` (native) | e.g. `claude-opus-4-8` |
+
+Claude uses the **native Anthropic SDK** (`src/ai/anthropic_llm.py`) — system
+prompt as a top-level param, tools via `input_schema`, content-block responses —
+not an OpenAI-compatibility shim. The same bounded loop, grounding prompt, and
+token guardrails apply to all three.
 
 ## How responses are generated
 

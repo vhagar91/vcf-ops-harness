@@ -15,6 +15,7 @@ from ..config.types import PipelineEvent
 from ..memory.memory import ConversationMemory
 from ..actions.registry import ActionRegistry
 from ..ai.llm import process_with_llm, LlmConfig
+from ..ai.anthropic_llm import process_with_anthropic
 from ..utils.logger import info
 
 
@@ -51,7 +52,12 @@ async def run_pipeline(
         text=event.text[:120],
     )
 
-    reply = await process_with_llm(
+    runner = (
+        process_with_anthropic
+        if llm_config.provider == "anthropic"
+        else process_with_llm
+    )
+    reply = await runner(
         user_message=event.text,
         channel=event.channel,
         thread_ts=event.thread_ts,
