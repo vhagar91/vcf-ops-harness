@@ -7,13 +7,28 @@ from typing import Any, Callable, Coroutine
 
 
 @dataclass
+class ToolCall:
+    """A single tool/function call requested by the assistant."""
+
+    id: str
+    name: str
+    arguments: str  # raw JSON string as returned by the model
+
+
+@dataclass
 class Message:
-    """A single message in a conversation."""
+    """A single message in a conversation.
+
+    An assistant message may carry one or more ``tool_calls`` (parallel calls
+    live in a *single* assistant message, per the OpenAI contract). A ``tool``
+    message carries the result of one call, keyed by ``tool_call_id``.
+    """
 
     role: str  # 'system' | 'user' | 'assistant' | 'tool'
     content: str
     tool_call_id: str | None = None
     tool_name: str | None = None
+    tool_calls: list[ToolCall] | None = None
 
 
 @dataclass

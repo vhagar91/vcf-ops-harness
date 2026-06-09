@@ -23,18 +23,26 @@ def create_and_start(config: HarnessConfig ,registry: ActionRegistry) -> None:
     """Create the Slack app, wire handlers, and start listening."""
     memory = ConversationMemory(max_turns=config.max_conversation_turns)
 
+    _common = dict(
+        provider=config.llm_provider,
+        system_prompt=config.system_prompt,
+        is_thinking_model=config.is_thinking_model,
+        max_output_tokens=config.max_output_tokens,
+        request_timeout_s=config.request_timeout_s,
+        max_tool_iterations=config.max_tool_iterations,
+    )
     if config.llm_provider == "ollama":
         llm_config = LlmConfig(
             api_key="ollama",  # Ollama doesn't need a real key
             model=config.ollama_model,
             base_url=config.ollama_base_url,
-            system_prompt=config.system_prompt,
+            **_common,
         )
     else:
         llm_config = LlmConfig(
             api_key=config.openai_api_key,
             model=config.openai_model,
-            system_prompt=config.system_prompt,
+            **_common,
         )
 
     # ------------------------------------------------------------------
@@ -64,6 +72,12 @@ def create_and_start(config: HarnessConfig ,registry: ActionRegistry) -> None:
             text=text,
             thread_ts=thread_ts,
         )
+
+        # Quick ack so a multi-step (and now slower) call doesn't look like a hang.
+        try:
+            say(text="🔎 Working on it…", thread_ts=thread_ts)
+        except Exception:
+            pass  # ack is best-effort
 
         try:
             import asyncio
