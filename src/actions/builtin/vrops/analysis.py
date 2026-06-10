@@ -1,10 +1,21 @@
-"""Pure, network-free analysis helpers for vrops_diagnose.
+"""Pure, network-free analysis helpers for the vROps tools.
 
 Every function here is deterministic and takes plain data, so the LLM only ever
-narrates a pre-computed verdict — it cannot invent trends or numbers.
+narrates a pre-computed verdict — it cannot invent trends or numbers, and large
+result sets are aggregated into compact summaries that fit the context budget.
 """
 
 from __future__ import annotations
+
+# Alert criticality ordered most-severe first; unknown levels sort last.
+ALERT_SEVERITY_ORDER = ["CRITICAL", "IMMEDIATE", "WARNING", "INFORMATION"]
+
+
+def _severity_rank(level: str | None) -> int:
+    try:
+        return ALERT_SEVERITY_ORDER.index((level or "").upper())
+    except ValueError:
+        return len(ALERT_SEVERITY_ORDER)
 
 # Default per-metric thresholds, keyed by vROps stat key. A sample breaches when
 # it reaches or exceeds `threshold`. `threshold=None` means no threshold is defined.
@@ -126,3 +137,52 @@ def rollup_verdict(health_state: str | None, alerts: list[dict],
     if state in ("ORANGE", "YELLOW") or breached or "WARNING" in levels:
         return "WARNING"
     return "OK"
+
+
+def summarize_alerts(alerts: list[dict], top_n: int = 10,
+                     max_name_groups: int = 10) -> dict:
+    """Aggregate alerts into a compact, COMPLETE summary that fits the context
+    budget: an accurate total, breakdowns by criticality and status, the most
+    common alert names, and the most-severe alerts in detail.
+
+    Returning the full alert list would be capped/truncated before the model
+    sees it (see MAX_TOOL_RESULT_CHARS / MAX_TOOL_LIST_ITEMS), so the model could
+    neither count nor describe a large alert set. This summary keeps the totals
+    accurate regardless of how many alerts there are.
+    """
+    total = len(alerts)
+    by_criticality: dict[str, int] = {}
+    by_status: dict[str, int] = {}
+    by_name: dict[str, int] = {}
+    for a in alerts:
+        level = (a.get("level") or "UNKNOWN").upper()
+        status = (a.get("status") or "UNKNOWN").upper()
+        name = a.get("name") or "(unnamed)"
+        by_criticality[level] = by_criticality.get(level, 0) + 1
+        by_status[status] = by_status.get(status, 0) + 1
+        by_name[name] = by_name.get(name, 0) + 1
+
+    # Order the criticality breakdown most-severe first for readable narration.
+    by_criticality = dict(sorted(by_criticality.items(),
+                                 key=lambda kv: _severity_rank(kv[0])))
+    # Keep only the most common alert names so the payload stays bounded.
+    by_name = dict(sorted(by_name.items(), key=lambda kv: kv[1],
+                          reverse=True)[:max_name_groups])
+
+    # Most-severe first, then most-recent, for the detailed sample.
+    ranked = sorted(alerts, key=lambda a: (_severity_rank(a.get("level")),
+                                           -(a.get("startTimeUTC") or 0)))
+    top = [
+        {"alertId": a.get("alertId"), "name": a.get("name"),
+         "level": a.get("level"), "status": a.get("status"),
+         "resourceId": a.get("resourceId")}
+        for a in ranked[:top_n]
+    ]
+    return {
+        "total": total,
+        "by_criticality": by_criticality,
+        "by_status": by_status,
+        "by_name": by_name,
+        "top": top,
+        "shown_in_top": len(top),
+    }

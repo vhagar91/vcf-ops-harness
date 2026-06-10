@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ....config.types import ActionDefinition, ActionResult
 from .vrops_client import VropsClient
+from .analysis import summarize_alerts
 from ....utils.logger import info, error
 
 # ---------------------------------------------------------------------------
@@ -260,11 +261,16 @@ async def _vrops_get_alerts(args: dict) -> ActionResult:
             criticality=args.get("criticality"),
             active_only=args.get("active_only", True),
         )
-        return ActionResult(
-            success=True,
-            summary=f"Found {len(alerts)} alert(s)",
-            raw=alerts,
-        )
+        # Aggregate into a compact, complete summary. Returning the raw list would
+        # be capped/truncated before the model sees it, so large alert sets could
+        # be neither counted nor described (see summarize_alerts docstring).
+        summary = summarize_alerts(alerts)
+        if summary["total"]:
+            breakdown = ", ".join(f"{lvl} {n}" for lvl, n in summary["by_criticality"].items())
+            headline = f"{summary['total']} alert(s): {breakdown}"
+        else:
+            headline = "No alerts found"
+        return ActionResult(success=True, summary=headline, raw=summary)
     except Exception as e:
         return ActionResult(success=False, summary=str(e))
 
@@ -494,8 +500,12 @@ vrops_actions: list[ActionDefinition] = [
     ActionDefinition(
         name="vrops_get_alerts",
         description=(
-            "List active alerts. Optionally filter by resource_id and/or "
-            "criticality. Returns alert name, level, status, and triggering resource."
+            "Summarize active alerts. Optionally filter by resource_id and/or "
+            "criticality. Returns a COMPLETE compact summary: accurate total, "
+            "breakdown by criticality and status, the most common alert names, "
+            "and the most-severe alerts in detail (the 'top' list). Report the "
+            "total and breakdown; do not claim the 'top' list is the full set. "
+            "Use vrops_get_alert with an alertId for full detail on one alert."
         ),
         input_schema={
             "type": "object",

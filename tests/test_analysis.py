@@ -148,3 +148,61 @@ def test_build_recommendations_warning_alert_not_healthy():
     recs = build_recommendations("GREEN", alerts, [])
     assert recs != ["No action needed; resource is healthy."]
     assert any("alert" in r.lower() for r in recs)
+
+
+from src.actions.builtin.vrops.analysis import summarize_alerts
+
+
+def _alerts(n, level="INFORMATION", status="ACTIVE", name="RDS Recomendation Execute"):
+    return [
+        {"alertId": f"id-{i}", "name": name, "level": level, "status": status,
+         "resourceId": f"res-{i}", "startTimeUTC": 1000 + i}
+        for i in range(n)
+    ]
+
+
+def test_summarize_alerts_empty():
+    s = summarize_alerts([])
+    assert s["total"] == 0
+    assert s["by_criticality"] == {}
+    assert s["top"] == []
+
+
+def test_summarize_alerts_counts_total_and_breakdown():
+    s = summarize_alerts(_alerts(50))
+    assert s["total"] == 50
+    assert s["by_criticality"] == {"INFORMATION": 50}
+    assert s["by_status"] == {"ACTIVE": 50}
+    assert s["by_name"] == {"RDS Recomendation Execute": 50}
+
+
+def test_summarize_alerts_caps_top_detail():
+    s = summarize_alerts(_alerts(50), top_n=10)
+    # total stays accurate; detailed list is capped
+    assert s["total"] == 50
+    assert len(s["top"]) == 10
+    assert s["shown_in_top"] == 10
+
+
+def test_summarize_alerts_orders_top_by_severity():
+    alerts = _alerts(3, level="INFORMATION") + _alerts(1, level="CRITICAL") + _alerts(2, level="WARNING")
+    s = summarize_alerts(alerts, top_n=10)
+    # most severe first
+    assert s["top"][0]["level"] == "CRITICAL"
+    assert s["top"][1]["level"] == "WARNING"
+    assert s["by_criticality"]["CRITICAL"] == 1
+    assert s["by_criticality"]["WARNING"] == 2
+    assert s["by_criticality"]["INFORMATION"] == 3
+    # by_criticality is ordered most-severe first
+    assert list(s["by_criticality"].keys()) == ["CRITICAL", "WARNING", "INFORMATION"]
+
+
+def test_summarize_alerts_groups_by_name_capped():
+    alerts = [
+        {"alertId": f"id-{i}", "name": f"Alert {i}", "level": "WARNING",
+         "status": "ACTIVE", "resourceId": "r", "startTimeUTC": i}
+        for i in range(20)
+    ]
+    s = summarize_alerts(alerts, max_name_groups=10)
+    assert s["total"] == 20
+    assert len(s["by_name"]) == 10
