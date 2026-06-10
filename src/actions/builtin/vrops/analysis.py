@@ -104,7 +104,10 @@ def build_recommendations(health_state: str | None, alerts: list[dict],
         recs.append("Disk latency is elevated; check datastore contention or the storage backend.")
 
     if not recs:
-        if (health_state or "").upper() in ("RED", "ORANGE", "YELLOW"):
+        if alerts:
+            recs.append("Active alerts present but no threshold breaches detected; "
+                        "review the alerts and recent changes.")
+        elif (health_state or "").upper() in ("RED", "ORANGE", "YELLOW"):
             recs.append("Health is degraded but no threshold breaches detected; "
                         "review active alerts and recent changes.")
         else:

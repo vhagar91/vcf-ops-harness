@@ -34,7 +34,7 @@ async def _vrops_diagnose(args: dict) -> ActionResult:
     if not matches:
         return ActionResult(success=False, summary=f"No resource matches '{name}'.")
     if len(matches) > 1:
-        listing = ", ".join(f"{m['name']} ({m['resourceKind']})" for m in matches[:10])
+        listing = ", ".join(f"{m.get('name')} ({m.get('resourceKind')})" for m in matches[:10])
         return ActionResult(
             success=True,
             summary=f"'{name}' matches {len(matches)} resources ({listing}); "
@@ -79,7 +79,7 @@ async def _vrops_diagnose(args: dict) -> ActionResult:
     report["verdict"] = rollup_verdict(state, alerts, metrics)
 
     breaching = [m["label"] for m in metrics if m["breached"]]
-    headline = f"{resource.get('name')}: {report['verdict']}"
+    headline = f"{resource.get('name') or resource_id}: {report['verdict']}"
     if breaching:
         headline += f" — breaching: {', '.join(breaching)}"
     return ActionResult(success=True, summary=headline, raw=report)

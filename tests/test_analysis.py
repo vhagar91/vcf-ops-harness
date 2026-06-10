@@ -140,3 +140,11 @@ def test_rollup_verdict_warning_on_breach():
 def test_rollup_verdict_ok_when_clean():
     metrics = [summarize_metric("cpu|usage_average", [10, 12])]
     assert rollup_verdict("GREEN", [], metrics) == "OK"
+
+
+def test_build_recommendations_warning_alert_not_healthy():
+    # a non-critical active alert must not produce a "healthy / no action" message
+    alerts = [{"level": "WARNING", "name": "High latency", "alertId": "a9"}]
+    recs = build_recommendations("GREEN", alerts, [])
+    assert recs != ["No action needed; resource is healthy."]
+    assert any("alert" in r.lower() for r in recs)
