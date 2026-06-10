@@ -59,8 +59,12 @@ async def _vrops_diagnose(args: dict) -> ActionResult:
         report["health"] = {"state": None, "value": None}
         report["gaps"].append("health")
 
-    # 3. Active alerts (capped).
-    alerts = client.get_alerts(resource_id=resource_id, active_only=True) or []
+    # 3. Active alerts (capped). Drop canceled alerts — they no longer reflect
+    # current state, so they must not drive the verdict or recommendations.
+    alerts = [
+        a for a in (client.get_alerts(resource_id=resource_id, active_only=True) or [])
+        if (a.get("status") or "").upper() not in ("CANCELED", "CANCELLED")
+    ]
     report["active_alerts"] = [
         {"criticality": a.get("level"), "name": a.get("name"), "alertId": a.get("alertId")}
         for a in alerts[:10]
