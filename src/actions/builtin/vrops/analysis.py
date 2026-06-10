@@ -52,3 +52,74 @@ def evaluate_threshold(samples: list[float], threshold: float | None) -> tuple[b
         return (False, 0)
     count = sum(1 for s in samples if s >= threshold)
     return (count > 0, count)
+
+
+def summarize_metric(key: str, samples: list[float]) -> dict:
+    """Build the compact per-metric verdict for one stat key."""
+    meta = METRIC_CATALOG.get(key, {"label": key, "threshold": None, "unit": ""})
+    threshold = meta["threshold"]
+    if not samples:
+        return {
+            "key": key, "label": meta["label"], "unit": meta["unit"],
+            "samples": 0, "latest": None, "avg": None, "min": None, "max": None,
+            "trend": "stable", "threshold": threshold,
+            "breached": False, "breach_count": 0,
+        }
+    breached, breach_count = evaluate_threshold(samples, threshold)
+    return {
+        "key": key, "label": meta["label"], "unit": meta["unit"],
+        "samples": len(samples),
+        "latest": round(samples[-1], 2),
+        "avg": round(sum(samples) / len(samples), 2),
+        "min": round(min(samples), 2),
+        "max": round(max(samples), 2),
+        "trend": compute_trend(samples),
+        "threshold": threshold,
+        "breached": breached,
+        "breach_count": breach_count,
+    }
+
+
+def build_recommendations(health_state: str | None, alerts: list[dict],
+                          metrics: list[dict]) -> list[str]:
+    """Map detected conditions to ranked, canned remediation suggestions."""
+    recs: list[str] = []
+    crit = [a for a in alerts if (a.get("level") or "").upper() in ("CRITICAL", "IMMEDIATE")]
+    for a in crit:
+        recs.append(f"Investigate critical alert: {a.get('name') or a.get('alertId')}.")
+
+    by_key = {m["key"]: m for m in metrics}
+    cpu = by_key.get("cpu|usage_average")
+    if cpu and cpu["breached"]:
+        if cpu["trend"] == "rising":
+            recs.append("CPU is sustained high and climbing; investigate a runaway "
+                        "process or add vCPU capacity.")
+        else:
+            recs.append("CPU is sustained high; review workload sizing or add vCPU capacity.")
+    mem = by_key.get("mem|usage_average")
+    if mem and mem["breached"]:
+        recs.append("Memory usage is high; check for leaks/ballooning or add RAM.")
+    disk = by_key.get("virtualDisk|totalLatency")
+    if disk and disk["breached"]:
+        recs.append("Disk latency is elevated; check datastore contention or the storage backend.")
+
+    if not recs:
+        if (health_state or "").upper() in ("RED", "ORANGE", "YELLOW"):
+            recs.append("Health is degraded but no threshold breaches detected; "
+                        "review active alerts and recent changes.")
+        else:
+            recs.append("No action needed; resource is healthy.")
+    return recs
+
+
+def rollup_verdict(health_state: str | None, alerts: list[dict],
+                   metrics: list[dict]) -> str:
+    """Overall verdict: OK | WARNING | CRITICAL."""
+    state = (health_state or "").upper()
+    levels = {(a.get("level") or "").upper() for a in alerts}
+    if state == "RED" or "CRITICAL" in levels or "IMMEDIATE" in levels:
+        return "CRITICAL"
+    breached = any(m["breached"] for m in metrics)
+    if state in ("ORANGE", "YELLOW") or breached or "WARNING" in levels:
+        return "WARNING"
+    return "OK"
