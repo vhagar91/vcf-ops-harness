@@ -514,7 +514,7 @@ vrops_actions: list[ActionDefinition] = [
                 "criticality": {
                     "type": "string",
                     "description": "Optional severity filter",
-                    "enum": ["INFO", "WARNING", "IMMEDIATE", "CRITICAL"],
+                    "enum": ["INFORMATION", "WARNING", "IMMEDIATE", "CRITICAL"],
                 },
                 "active_only": {"type": "boolean", "description": "Only active (uncancelled) alerts", "default": True},
             },

@@ -59,3 +59,71 @@ def test_get_alerts_empty(monkeypatch):
     res = _run({"active_only": True})
     assert res.raw["total"] == 0
     assert res.summary == "No alerts found"
+
+
+# --- Client-level: get_alerts uses POST /alerts/query (server-side filtering) ---
+from src.actions.builtin.vrops.vrops_client import VropsClient
+
+
+class _QueryResp:
+    def __init__(self, alerts, total, page, page_size):
+        self.status_code = 200
+        self._j = {"pageInfo": {"totalCount": total, "page": page, "pageSize": page_size},
+                   "alerts": alerts}
+
+    def json(self):
+        return self._j
+
+
+def _raw(i, status="ACTIVE", level="CRITICAL"):
+    return {"alertId": f"a{i}", "alertDefinitionName": f"Def {i}", "alertLevel": level,
+            "status": status, "resourceId": f"r{i}", "startTimeUTC": i, "alertImpact": "risk"}
+
+
+def _query_client(dataset, captured):
+    client = VropsClient("h", "u", "p")
+
+    def fake_request(method, path, **kw):
+        captured.append({"method": method, "path": path,
+                         "json": kw.get("json"), "params": kw.get("params")})
+        ps = kw["params"]["pageSize"]
+        page = kw["params"]["page"]
+        start = page * ps
+        return _QueryResp(dataset[start:start + ps], total=len(dataset),
+                          page=page, page_size=ps)
+
+    client._request = fake_request
+    return client
+
+
+def test_get_alerts_uses_query_endpoint_with_active_only():
+    captured = []
+    client = _query_client([_raw(0)], captured)
+    client.get_alerts(active_only=True)
+    assert captured[0]["method"] == "POST"
+    assert captured[0]["path"] == "/alerts/query"
+    assert captured[0]["json"]["activeOnly"] is True
+
+
+def test_get_alerts_paginates_query_results():
+    # 5 alerts, page_size 2 -> 3 pages; all must be assembled.
+    dataset = [_raw(i) for i in range(5)]
+    captured = []
+    client = _query_client(dataset, captured)
+    out = client.get_alerts(active_only=True, page_size=2)
+    assert len(out) == 5
+    assert sum(1 for c in captured if c["path"] == "/alerts/query") == 3
+
+
+def test_get_alerts_maps_info_criticality_to_information():
+    captured = []
+    client = _query_client([_raw(0, level="INFORMATION")], captured)
+    client.get_alerts(criticality="INFO")
+    assert captured[0]["json"]["alertCriticality"] == ["INFORMATION"]
+
+
+def test_get_alerts_scopes_by_resource_id():
+    captured = []
+    client = _query_client([_raw(0)], captured)
+    client.get_alerts(resource_id="res-123")
+    assert captured[0]["json"]["resource-query"] == {"resourceId": ["res-123"]}
