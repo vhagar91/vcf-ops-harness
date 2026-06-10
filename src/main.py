@@ -18,6 +18,7 @@ from .actions.registry import ActionRegistry
 from .actions.builtin.echo import echo_action
 from .actions.builtin.get_time import get_time_action
 from .actions.builtin.vrops.actions import vrops_actions
+from .actions.builtin.vrops.diagnose import vrops_diagnose_action
 from .slack.bot import create_and_start
 from .utils.logger import info, error, set_log_level, LogLevel
 
@@ -35,7 +36,7 @@ def main() -> None:
     # 1. Load config
     config = load_config()
     provider = config.llm_provider
-    active_model = config.ollama_model if provider == "ollama" else config.openai_model
+    active_model = config.active_model
     info(
         "Configuration loaded",
         slack_port=config.slack_port,
@@ -52,6 +53,7 @@ def main() -> None:
     # Register vROps actions
     for action in vrops_actions:
         registry.register(action)
+    registry.register(vrops_diagnose_action)
 
     # 3. Build and start Slack bot
     create_and_start(config,registry)
