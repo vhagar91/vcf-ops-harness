@@ -45,6 +45,18 @@ def test_evaluate_threshold_empty_samples():
     assert evaluate_threshold([], 90.0) == (False, 0)
 
 
+def test_evaluate_threshold_inclusive_boundary():
+    # a sample exactly at the threshold counts as a breach
+    assert evaluate_threshold([90.0], 90.0) == (True, 1)
+
+
 def test_catalog_keys_match_standard_list():
-    assert STANDARD_METRIC_KEYS == list(METRIC_CATALOG.keys())
-    assert "cpu|usage_average" in METRIC_CATALOG
+    expected = [
+        "cpu|usage_average",
+        "mem|usage_average",
+        "virtualDisk|totalLatency",
+        "net|usage_average",
+        "disk|usage_average",
+    ]
+    assert STANDARD_METRIC_KEYS == expected
+    assert list(METRIC_CATALOG.keys()) == expected

@@ -7,7 +7,7 @@ narrates a pre-computed verdict — it cannot invent trends or numbers.
 from __future__ import annotations
 
 # Default per-metric thresholds, keyed by vROps stat key. A sample breaches when
-# it exceeds `threshold`. `threshold=None` means no threshold is defined.
+# it reaches or exceeds `threshold`. `threshold=None` means no threshold is defined.
 METRIC_CATALOG: dict[str, dict] = {
     "cpu|usage_average":        {"label": "CPU %",           "threshold": 90.0, "unit": "%"},
     "mem|usage_average":        {"label": "Memory %",        "threshold": 90.0, "unit": "%"},
@@ -44,11 +44,11 @@ def compute_trend(samples: list[float], rel_tol: float = 0.05) -> str:
 
 
 def evaluate_threshold(samples: list[float], threshold: float | None) -> tuple[bool, int]:
-    """Return (breached, breach_count): how many samples exceed the threshold.
+    """Return (breached, breach_count): how many samples are at or above the threshold.
 
     A None threshold (no limit defined) or empty series -> (False, 0).
     """
     if threshold is None or not samples:
         return (False, 0)
-    count = sum(1 for s in samples if s > threshold)
+    count = sum(1 for s in samples if s >= threshold)
     return (count > 0, count)
