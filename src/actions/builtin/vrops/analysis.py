@@ -175,7 +175,9 @@ def summarize_alerts(alerts: list[dict], top_n: int = 10,
     top = [
         {"alertId": a.get("alertId"), "name": a.get("name"),
          "level": a.get("level"), "status": a.get("status"),
-         "resourceId": a.get("resourceId")}
+         "resourceId": a.get("resourceId"),
+         "resourceName": a.get("resourceName"),
+         "resourceKind": a.get("resourceKind")}
         for a in ranked[:top_n]
     ]
     return {
