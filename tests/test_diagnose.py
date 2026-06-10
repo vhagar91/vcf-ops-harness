@@ -135,3 +135,16 @@ def test_diagnose_partial_failure_records_gap(monkeypatch):
 def test_action_definition_shape():
     assert vrops_diagnose_action.name == "vrops_diagnose"
     assert vrops_diagnose_action.input_schema["required"] == ["name"]
+
+
+from src.config.settings import DEFAULT_SYSTEM_PROMPT
+
+
+def test_system_prompt_routes_to_diagnose():
+    assert "vrops_diagnose" in DEFAULT_SYSTEM_PROMPT
+
+
+def test_system_prompt_constrains_narration():
+    # the narration template must forbid stating numbers not in the report
+    assert "only" in DEFAULT_SYSTEM_PROMPT.lower()
+    assert "report" in DEFAULT_SYSTEM_PROMPT.lower()

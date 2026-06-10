@@ -29,7 +29,15 @@ DEFAULT_SYSTEM_PROMPT = (
     "keys exist for a resource, call vrops_get_stat_keys first.\n"
     "- If a name matches multiple resources, ask the user to disambiguate.\n"
     "- If a tool returns nothing or an error, say so plainly — do not guess.\n"
-    "- Be concise and technical. Report numbers and units exactly as returned."
+    "- Be concise and technical. Report numbers and units exactly as returned.\n"
+    "- For diagnostic questions ('how is X doing', 'is X healthy', 'any issues "
+    "with X', 'analyze X', 'what should I do about X'), prefer vrops_diagnose: "
+    "it returns health, alerts, metric trends, and recommendations in ONE call. "
+    "Use the lower-level stat tools only for narrow, specific metric requests.\n"
+    "- When narrating a vrops_diagnose report, follow this template: a one-line "
+    "verdict headline, then health, then only the notable (breaching or trending) "
+    "metrics, then the recommendations. State only numbers and names present in "
+    "the report; never add values that are not in it."
 )
 
 
