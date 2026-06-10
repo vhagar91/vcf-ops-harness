@@ -877,6 +877,10 @@ class VropsClient:
                     "startTimeUTC": a.get("startTimeUTC"),
                     "impact": a.get("alertImpact") or a.get("impact"),
                 })
+            # When only active alerts are requested, exclude canceled ones
+            # since the API's activeOnly filter may still return them.
+            if active_only:
+                out = [a for a in out if a["status"] != "CANCELED"]
             return out
         except Exception as e:
             logging.error(f"Error getting alerts: {e}")
