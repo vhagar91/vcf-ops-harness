@@ -261,6 +261,13 @@ async def _vrops_get_alerts(args: dict) -> ActionResult:
             criticality=args.get("criticality"),
             active_only=args.get("active_only", True),
         )
+        # Resolve resource IDs to object names so the model reports names, not
+        # opaque UUIDs. One batched lookup for all alerts.
+        names = client.get_resource_names([a.get("resourceId") for a in alerts])
+        for a in alerts:
+            info = names.get(a.get("resourceId")) or {}
+            a["resourceName"] = info.get("name")
+            a["resourceKind"] = info.get("kind")
         # Aggregate into a compact, complete summary. Returning the raw list would
         # be capped/truncated before the model sees it, so large alert sets could
         # be neither counted nor described (see summarize_alerts docstring).
@@ -503,8 +510,10 @@ vrops_actions: list[ActionDefinition] = [
             "Summarize active alerts. Optionally filter by resource_id and/or "
             "criticality. Returns a COMPLETE compact summary: accurate total, "
             "breakdown by criticality and status, the most common alert names, "
-            "and the most-severe alerts in detail (the 'top' list). Report the "
-            "total and breakdown; do not claim the 'top' list is the full set. "
+            "and the most-severe alerts in detail (the 'top' list, each with the "
+            "affected object's resourceName and resourceKind). Report the total "
+            "and breakdown, and refer to objects by resourceName (not resourceId); "
+            "do not claim the 'top' list is the full set. "
             "Use vrops_get_alert with an alertId for full detail on one alert."
         ),
         input_schema={

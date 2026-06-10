@@ -906,6 +906,33 @@ class VropsClient:
             logging.error(f"Error querying alerts: {e}")
             return []
 
+    def get_resource_names(self, resource_ids: List[str],
+                           chunk_size: int = 100) -> Dict[str, Dict[str, Any]]:
+        """Resolve resource IDs to {id: {"name", "kind"}} in batched lookups.
+
+        Alerts carry only a resourceId, so callers use this to show object names
+        instead of opaque UUIDs. Duplicate and empty IDs are ignored.
+        """
+        ids = [r for r in dict.fromkeys(resource_ids) if r]
+        out: Dict[str, Dict[str, Any]] = {}
+        for i in range(0, len(ids), chunk_size):
+            chunk = ids[i:i + chunk_size]
+            try:
+                resp = self._request("GET", "/resources",
+                                     params={"resourceId": chunk, "pageSize": len(chunk)})
+                if resp.status_code != 200:
+                    logging.error(f"get_resource_names failed: {resp.status_code}")
+                    continue
+                for res in resp.json().get("resourceList", []):
+                    rk = res.get("resourceKey", {})
+                    out[res.get("identifier")] = {
+                        "name": rk.get("name"),
+                        "kind": rk.get("resourceKindKey"),
+                    }
+            except Exception as e:
+                logging.error(f"Error resolving resource names: {e}")
+        return out
+
     def get_alert(self, alert_id: str) -> Optional[Dict[str, Any]]:
         """Get full detail for a single alert."""
         try:
