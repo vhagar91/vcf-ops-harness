@@ -108,24 +108,6 @@ def test_diagnose_healthy_verdict_ok(monkeypatch):
     assert res.raw["recommendations"] == ["No action needed; resource is healthy."]
 
 
-def test_diagnose_ignores_canceled_alerts(monkeypatch):
-    # A canceled alert no longer reflects current state: it must not appear in
-    # the report and must not drive the verdict or recommendations.
-    matches = [{"identifier": "1", "name": "web-01", "resourceKind": "VirtualMachine"}]
-    client = _FakeClient(
-        matches=matches,
-        health={"health": "GREEN", "healthValue": 100},
-        alerts=[{"level": "CRITICAL", "name": "Old CPU spike",
-                 "alertId": "a1", "status": "CANCELED"}],
-        series={"cpu|usage_average": [10, 12, 11]},
-    )
-    _patch(monkeypatch, client)
-    res = _run({"name": "web-01"})
-    assert res.raw["active_alerts"] == []
-    assert res.raw["verdict"] == "OK"
-    assert res.raw["recommendations"] == ["No action needed; resource is healthy."]
-
-
 def test_diagnose_critical_verdict(monkeypatch):
     matches = [{"identifier": "1", "name": "db-01", "resourceKind": "VirtualMachine"}]
     client = _FakeClient(

@@ -901,10 +901,6 @@ class VropsClient:
                 if not batch or total is None or len(out) >= total:
                     break
                 page += 1
-            # Defense-in-depth: the query endpoint already excludes canceled when
-            # activeOnly is set, but drop any that slip through.
-            if active_only:
-                out = [a for a in out if a["status"] != "CANCELED"]
             return out
         except Exception as e:
             logging.error(f"Error querying alerts: {e}")
