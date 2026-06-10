@@ -85,6 +85,14 @@ class HarnessConfig:
     # Thinking-model handling ("auto" -> detect by model name)
     is_thinking_model: bool = False
 
+    @property
+    def active_model(self) -> str:
+        """Model name for the selected provider."""
+        return {
+            "ollama": self.ollama_model,
+            "anthropic": self.anthropic_model,
+        }.get(self.llm_provider, self.openai_model)
+
 
 def _required(name: str) -> str:
     val = os.environ.get(name)

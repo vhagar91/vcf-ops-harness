@@ -36,7 +36,7 @@ def main() -> None:
     # 1. Load config
     config = load_config()
     provider = config.llm_provider
-    active_model = config.ollama_model if provider == "ollama" else config.openai_model
+    active_model = config.active_model
     info(
         "Configuration loaded",
         slack_port=config.slack_port,
