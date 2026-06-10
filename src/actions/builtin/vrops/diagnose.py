@@ -100,7 +100,7 @@ vrops_diagnose_action = ActionDefinition(
             "name": {"type": "string", "description": "Resource name to diagnose"},
             "resource_kind": {
                 "type": "string",
-                "description": "Resource kind (e.g. VirtualMachine, HostSystem)",
+                "description": "Resource kind (e.g. VirtualMachine, HostSystem,ClusterComputeResource)",
                 "default": "VirtualMachine",
             },
             "adapter_kind": {"type": "string", "description": "Adapter kind (e.g. VMWARE)"},
