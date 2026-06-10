@@ -847,39 +847,63 @@ class VropsClient:
             logging.error(f"Error getting health for {resource_id}: {e}")
             return None
 
+    # All alert criticalities, used when no specific filter is requested.
+    ALERT_CRITICALITIES = ["CRITICAL", "IMMEDIATE", "WARNING", "INFORMATION"]
+
     def get_alerts(self, resource_id: Optional[str] = None,
                    criticality: Optional[str] = None,
                    active_only: bool = True,
-                   page_size: int = 100) -> List[Dict[str, Any]]:
-        """List alerts, optionally filtered by resource and/or criticality."""
-        params: Dict[str, Any] = {
-            "page": 0,
-            "pageSize": page_size,
-            "activeOnly": str(active_only).lower(),
+                   page_size: int = 1000,
+                   max_alerts: int = 10000) -> List[Dict[str, Any]]:
+        """List alerts via POST /alerts/query.
+
+        The GET /alerts endpoint ignores the activeOnly filter (it returns every
+        alert, mostly canceled), so a single page of canceled noise hid the few
+        active alerts. The query endpoint honors activeOnly server-side. Paginate
+        until the full result set is fetched.
+        """
+        if criticality:
+            crit = criticality.upper()
+            # The API spells it INFORMATION; accept the common INFO shorthand.
+            crit = "INFORMATION" if crit == "INFO" else crit
+            criticalities = [crit]
+        else:
+            criticalities = list(self.ALERT_CRITICALITIES)
+        body: Dict[str, Any] = {
+            "activeOnly": bool(active_only),
+            "alertCriticality": criticalities,
         }
         if resource_id:
-            params["resourceId"] = resource_id
-        if criticality:
-            params["alertCriticality"] = criticality
+            body["resource-query"] = {"resourceId": [resource_id]}
+
+        out: List[Dict[str, Any]] = []
+        page = 0
         try:
-            resp = self._request("GET", "/alerts", params=params)
-            if resp.status_code != 200:
-                logging.error(f"get_alerts failed: {resp.status_code}")
-                return []
-            out = []
-            for a in resp.json().get("alerts", []):
-                out.append({
-                    "alertId": a.get("alertId"),
-                    "name": a.get("alertDefinitionName"),
-                    "level": a.get("alertLevel"),
-                    "status": a.get("status"),
-                    "resourceId": a.get("resourceId"),
-                    "startTimeUTC": a.get("startTimeUTC"),
-                    "impact": a.get("alertImpact") or a.get("impact"),
-                })
+            while len(out) < max_alerts:
+                resp = self._request("POST", "/alerts/query", json=body,
+                                     params={"page": page, "pageSize": page_size})
+                if resp.status_code != 200:
+                    logging.error(f"get_alerts query failed: {resp.status_code}")
+                    break
+                data = resp.json()
+                batch = data.get("alerts", [])
+                for a in batch:
+                    out.append({
+                        "alertId": a.get("alertId"),
+                        "name": a.get("alertDefinitionName"),
+                        "level": a.get("alertLevel"),
+                        "status": a.get("status"),
+                        "resourceId": a.get("resourceId"),
+                        "startTimeUTC": a.get("startTimeUTC"),
+                        "impact": a.get("alertImpact") or a.get("impact"),
+                    })
+                total = (data.get("pageInfo") or {}).get("totalCount")
+                if not batch or total is None or len(out) >= total:
+                    break
+                page += 1
             return out
         except Exception as e:
-            logging.error(f"Error getting alerts: {e}")
+            logging.error(f"Error querying alerts: {e}")
             return []
 
     def get_alert(self, alert_id: str) -> Optional[Dict[str, Any]]:
