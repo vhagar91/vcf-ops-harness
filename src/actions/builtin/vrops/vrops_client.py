@@ -968,3 +968,35 @@ class VropsClient:
         except Exception as e:
             logging.error(f"Error getting stats for {resource_id}: {e}")
             return {}
+
+    def get_stat_series(self, resource_id: str, stat_keys: List[str],
+                        hours_back: float = 24.0, rollup: str = "AVG",
+                        interval: str = "MINUTES", interval_qty: int = 5) -> Dict[str, List[float]]:
+        """Like get_stats, but returns the ordered (non-null) data points per key,
+        so callers can compute trends and threshold-breach counts."""
+        end = int(time.time() * 1000)
+        begin = end - int(hours_back * 3600 * 1000)
+        params: Dict[str, Any] = {
+            "statKey": stat_keys,
+            "begin": begin,
+            "end": end,
+            "rollUpType": rollup,
+            "intervalType": interval,
+            "intervalQuantifier": interval_qty,
+        }
+        try:
+            resp = self._request("GET", f"/resources/{resource_id}/stats", params=params)
+            if resp.status_code != 200:
+                logging.error(f"get_stat_series failed: {resp.status_code}")
+                return {}
+            series: Dict[str, List[float]] = {}
+            for v in resp.json().get("values", []):
+                for stat in v.get("stat-list", {}).get("stat", []):
+                    key = stat.get("statKey", {}).get("key")
+                    data = [d for d in (stat.get("data") or []) if d is not None]
+                    if key:
+                        series[key] = data
+            return series
+        except Exception as e:
+            logging.error(f"Error getting stat series for {resource_id}: {e}")
+            return {}
