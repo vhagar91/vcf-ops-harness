@@ -1020,23 +1020,26 @@ class VropsClient:
             logging.error(f"Error listing resources of kind {resource_kind}: {e}")
             return out
 
-    def get_descendants(self, resource_id: str, resource_kind: Optional[str] = None,
-                        relationship_type: str = "DESCENDANT",
-                        page_size: int = 1000) -> List[Dict[str, Any]]:
-        """Related resources of a resource (default: all descendants), optionally
-        filtered to one resource_kind. Used to scope a Datacenter down to its
-        clusters or VMs for site filtering.
+    def get_child_resources(self, resource_id: str, resource_kind: Optional[str] = None,
+                            page_size: int = 1000) -> List[Dict[str, Any]]:
+        """Direct child resources of a resource (a single CHILD hop), optionally
+        filtered to one resource_kind.
+
+        vROps relationships are single-hop only (relationshipType is PARENT, CHILD,
+        or ALL — there is NO transitive DESCENDANT; it returns HTTP 400). Multi-level
+        descent (e.g. Datacenter -> VMFolder -> VirtualMachine) is composed in the
+        fleet layer by calling this repeatedly.
         """
         out: List[Dict[str, Any]] = []
         page = 0
         try:
             while True:
-                params = {"relationshipType": relationship_type,
+                params = {"relationshipType": "CHILD",
                           "page": page, "pageSize": page_size}
                 resp = self._request("GET", f"/resources/{resource_id}/relationships",
                                      params=params)
                 if resp.status_code != 200:
-                    logging.error(f"get_descendants failed: {resp.status_code}")
+                    logging.error(f"get_child_resources failed: {resp.status_code}")
                     break
                 data = resp.json()
                 batch = data.get("resourceList", [])
@@ -1053,14 +1056,14 @@ class VropsClient:
                         "health": r.get("resourceHealth"),
                     })
                 total = (data.get("pageInfo") or {}).get("totalCount")
-                # The client-side resource_kind filter means len(out) != total, so
-                # page against total directly rather than the len(out) >= total pattern.
+                # The optional client-side resource_kind filter means len(out) may be
+                # < total, so page against total directly rather than len(out) >= total.
                 if not batch or total is None or (page + 1) * page_size >= total:
                     break
                 page += 1
             return out
         except Exception as e:
-            logging.error(f"Error getting descendants of {resource_id}: {e}")
+            logging.error(f"Error getting child resources of {resource_id}: {e}")
             return out
 
     def get_latest_stats_bulk(self, resource_ids: List[str], stat_keys: List[str],
