@@ -12,6 +12,30 @@
 
 ---
 
+## ⚠️ REVISION 2026-06-11 — corrected after live API validation
+
+The original Tasks 1, 3, 4, 5 below used **guessed** stat keys and a `DESCENDANT`
+relationship traversal that **do not work** on the real vROps API (validated against
+`docs/superpowers/api-specs/vrops-api.json` and live instance 192.168.75.1). Corrections,
+authoritative for implementation:
+
+- **No `DESCENDANT`:** relationships are single-hop (`PARENT|CHILD|ALL`). Task 3's
+  `get_descendants` is replaced by a single-hop CHILD primitive `get_child_resources`;
+  Task 4 adds a recursive `collect_descendants` BFS over container kinds.
+- **Cluster capacity keys:** rank by `OnlineCapacityAnalytics|capacityRemainingPercentage`
+  (+ `cpu|capacity_usagepct_average`, `mem|capacity_usagepct_average`,
+  `OnlineCapacityAnalytics|{cpu,mem,diskspace}|demand|capacityRemaining`).
+- **VM rightsizing keys:** `config|hardware|num_Cpu`, `cpu|vm_capacity_provisioned`,
+  `OnlineCapacityAnalytics|cpu|recommendedSize`, `mem|guest_provisioned`,
+  `OnlineCapacityAnalytics|mem|recommendedSize`. Oversizing computed via
+  `reclaimable_vcpu` / `reclaimable_mem_gb` helpers (see spec). `summary|oversized`,
+  `cpu|reclaimable`, `mem|reclaimable`, `*|capacityRemainingPercent` **do not exist**.
+
+The implementer prompts carry the corrected code; the task bodies below are the original
+draft and are superseded where they conflict with this banner and the spec.
+
+---
+
 ## File Structure
 
 **Create:**

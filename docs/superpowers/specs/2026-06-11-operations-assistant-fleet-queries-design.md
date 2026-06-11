@@ -64,11 +64,19 @@ src/actions/builtin/vrops/
 
 Pipeline, in order:
 
-1. **Enumerate** resources of a kind via the client.
-2. **Site-filter** through `sites.py`: resolve each resource's datacenter name → location,
-   keep matches. **Filter happens before the stats fetch** so metrics are only pulled for
-   in-scope resources.
-3. **Bulk-fetch** the relevant stat keys for the filtered set.
+1. **Scope** the resource set:
+   - No location → **enumerate** the whole kind via the client.
+   - With a location → resolve the location's datacenter names → datacenter IDs, then
+     **collect** resources of the target kind beneath them. vROps relationships are
+     **single-hop only** (`relationshipType` ∈ `PARENT|CHILD|ALL` — there is no
+     `DESCENDANT`), so this is a bounded **recursive CHILD walk**: BFS from each
+     datacenter, descending only into container kinds (`VMFolder`,
+     `ClusterComputeResource`, `HostSystem`, `ResourcePool`, `HostFolder`), collecting
+     the target kind, deduped, depth-capped. Clusters are direct datacenter children
+     (1 hop); VMs sit under VM folders / hosts (2–3 hops).
+2. Scoping (site-filter) **happens before the stats fetch** so metrics are only pulled
+   for in-scope resources.
+3. **Bulk-fetch** the relevant stat keys for the scoped set.
 4. **Aggregate / score** via pure helpers in `analysis.py`.
 5. Return a compact Python structure, **capped to top-N rows**, so the result never
    exceeds the `MAX_TOOL_RESULT_CHARS` budget regardless of fleet size.
@@ -95,27 +103,35 @@ Registered in `src/main.py` via `registry.register(...)`; exposed to both provid
 
 - **Params:** `location` (optional; omit = all sites), `top_n` (default 5),
   `sort` (`least_free` | `most_free`, default `least_free`).
-- **Behavior:** enumerate `ClusterComputeResource` → site-filter → bulk-fetch
-  CPU/mem/disk capacity-remaining stats → compute a **normalized free-capacity score**
-  (combine CPU/mem/disk remaining %) → rank.
-- **Returns:** ranked rows of `cluster name, site, CPU/mem/disk remaining (% + absolute),
-  demand, health`.
+- **Behavior:** scope `ClusterComputeResource` → bulk-fetch capacity stats → rank by
+  free capacity. **Primary ranking metric:** `OnlineCapacityAnalytics|capacityRemainingPercentage`
+  (vROps' own bottleneck %, lower = less free). Fallback when absent: `free_capacity_score`
+  over `[100 − cpu|capacity_usagepct_average, 100 − mem|capacity_usagepct_average]`.
+- **Returns:** ranked rows of `cluster name, site, capacity-remaining %, cpu/mem usage %,
+  per-dimension demand capacity-remaining (cpu/mem/diskspace), health`.
 - Answers "which cluster has the fewest free resources in Madrid."
 
 ### 2. `vrops_oversized_vms_report`
 
 - **Params:** `location` (optional), `top_n` (default 20), `min_reclaimable` (optional floor).
-- **Behavior:** enumerate `VirtualMachine` → site-filter → bulk-fetch vROps **native
-  rightsizing** metrics → keep oversized VMs → rank by reclaimable magnitude.
+- **Behavior:** scope `VirtualMachine` → bulk-fetch current+recommended sizing →
+  compute reclaimable CPU/memory → keep oversized VMs (reclaimable > 0) → rank by
+  reclaimable magnitude.
+- **vROps native rightsizing keys (verified on the live instance):**
+  - current vCPU count: `config|hardware|num_Cpu`
+  - current CPU MHz: `cpu|vm_capacity_provisioned`
+  - recommended CPU MHz: `OnlineCapacityAnalytics|cpu|recommendedSize`
+  - current memory (KB): `mem|guest_provisioned`
+  - recommended memory (KB): `OnlineCapacityAnalytics|mem|recommendedSize`
+- **Reclaimable math** (pure helpers in `analysis.py`):
+  - `reclaimable_mem_gb = max(0, mem|guest_provisioned − recommended_mem_KB) / 1048576`
+    (both KB, directly comparable).
+  - `reclaimable_vcpu = num_Cpu × (1 − recommended_cpu_MHz / cpu|vm_capacity_provisioned)`
+    when recommended < current, else 0. (recommendedSize is MHz, not a vCPU count, so we
+    convert via the VM's own MHz-per-vCPU ratio.)
 - **Returns:** rows of `VM name, site, current vs recommended vCPU/mem, reclaimable
-  vCPU/memory`.
+  vCPU/memory, oversize score`.
 - Answers "report of oversized VMs."
-- **Stat-key caveat:** exact rightsizing key names vary by Aria/vROps version.
-  Implementation confirms them against the live instance via the existing
-  `get_stat_keys` / statkeys endpoint rather than hardcoding blind. Candidate starting
-  keys: `summary|oversized`, reclaimable CPU/memory (e.g. `cpu|reclaimable`,
-  `mem|reclaimable`) and recommended-size keys. The spec records candidates; the PR
-  records what was actually found.
 
 ### 3. `vrops_fleet_query` (generic escape hatch — built last / optional)
 
@@ -164,10 +180,24 @@ Pure functions get real unit tests (no network), matching `tests/test_robustness
   per-resource; fleet reports use latest stats.
 - `vrops_fleet_query` is optional; defer unless the two reports prove insufficient.
 
-## Open items to confirm during implementation
+## API validation (verified against live instance 192.168.75.1, 2026-06-11)
 
-- Exact vROps rightsizing stat-key names for the active Aria/vROps version.
-- The cheapest reliable way to resolve cluster → datacenter (relationships endpoint vs.
-  a property already on the cluster resource).
-- Confirm `GET /resources/stats/latest` accepts multiple `resourceId` params on the
-  target instance; if not, fall back to chunked per-resource latest-stats.
+Validated against `docs/superpowers/api-specs/vrops-api.json` **and** the live vROps:
+
+- ✅ `GET /resources?resourceKind=…&page=&pageSize=` enumerates a whole kind;
+  `pageInfo.totalCount` drives pagination. (`list_resources_by_kind`)
+- ✅ `GET /resources/stats/latest?resourceId=…&statKey=…` accepts multiple `resourceId`
+  values and returns `values[].{resourceId, stat-list.stat[]}` — the bulk parser reads
+  the right keys. (The swagger names the property `stats`; the live JSON uses `stat-list`,
+  which the existing single-resource code already assumes.)
+- ❌ **`relationshipType=DESCENDANT` is invalid (HTTP 400).** Allowed: `PARENT|CHILD|ALL`.
+  Relationships are single-hop → site scoping uses the recursive CHILD walk described in
+  the fleet layer above. Verified hierarchy: Datacenter `CHILD` includes
+  `ClusterComputeResource` directly; `VMFolder` `CHILD` includes `VirtualMachine`.
+- ❌ The originally-guessed stat keys (`cpu|capacityRemainingPercent`, `summary|oversized`,
+  `cpu|reclaimable`, …) **do not exist** on the instance. Corrected keys are listed in the
+  tool sections above (all `OnlineCapacityAnalytics|…` / `config|hardware|…` family).
+
+These were confirmed empirically; any port to a different Aria/vROps version should
+re-run `get_stat_keys` against a sample cluster/VM, since key availability is
+version-dependent.
