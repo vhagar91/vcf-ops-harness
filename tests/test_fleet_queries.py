@@ -246,3 +246,102 @@ def test_attach_stats_skips_resources_without_id():
     c = FakeClient(stats={"c1": {"k": 1.0}})
     rows = attach_stats(c, [_r("c1", "A", "ClusterComputeResource"), {"name": "ghost"}], ["k"])
     assert [r["id"] for r in rows] == ["c1"]
+
+
+# --- report tools ------------------------------------------------------------
+import asyncio
+
+from src.actions.registry import ActionRegistry
+from src.actions.builtin.vrops import reports as reports_mod
+from src.actions.builtin.vrops.analysis import (
+    CLUSTER_CAPACITY_REMAINING_PCT_KEY,
+    VM_CURRENT_VCPU_KEY, VM_CURRENT_CPU_MHZ_KEY, VM_RECOMMENDED_CPU_MHZ_KEY,
+    VM_CURRENT_MEM_KB_KEY, VM_RECOMMENDED_MEM_KB_KEY,
+)
+
+
+def test_report_actions_register_and_expose_to_openai():
+    names = {a.name for a in reports_mod.vrops_report_actions}
+    assert names == {
+        "vrops_cluster_capacity_report",
+        "vrops_oversized_vms_report",
+        "vrops_fleet_query",
+    }
+    reg = ActionRegistry()
+    for action in reports_mod.vrops_report_actions:
+        reg.register(action)
+    tool_names = {t["function"]["name"] for t in reg.to_openai_tools()}
+    assert "vrops_cluster_capacity_report" in tool_names
+
+
+def test_cluster_capacity_report_ranks_least_free_first(monkeypatch):
+    c = FakeClient(
+        by_kind={"ClusterComputeResource": [
+            _r("c1", "LOW", "ClusterComputeResource"),
+            _r("c2", "HIGH", "ClusterComputeResource"),
+        ]},
+        stats={
+            "c1": {CLUSTER_CAPACITY_REMAINING_PCT_KEY: 5.0},
+            "c2": {CLUSTER_CAPACITY_REMAINING_PCT_KEY: 80.0},
+        },
+    )
+    monkeypatch.setattr(reports_mod, "_build_client", lambda args: c)
+    monkeypatch.setattr(reports_mod, "_site_map", lambda: SiteMap({}))
+    res = asyncio.run(reports_mod._vrops_cluster_capacity_report({}))
+    assert res.success
+    clusters = res.raw["clusters"]
+    assert [x["cluster"] for x in clusters] == ["LOW", "HIGH"]
+    assert clusters[0]["free_capacity_pct"] == 5.0
+
+
+def test_oversized_vms_report_flags_and_ranks(monkeypatch):
+    c = FakeClient(
+        by_kind={"VirtualMachine": [
+            _r("v1", "BIG", "VirtualMachine"),
+            _r("v2", "RIGHTSIZED", "VirtualMachine"),
+        ]},
+        stats={
+            "v1": {VM_CURRENT_VCPU_KEY: 4, VM_CURRENT_CPU_MHZ_KEY: 8400.0,
+                   VM_RECOMMENDED_CPU_MHZ_KEY: 4200.0,
+                   VM_CURRENT_MEM_KB_KEY: 8388608.0, VM_RECOMMENDED_MEM_KB_KEY: 4194304.0},
+            "v2": {VM_CURRENT_VCPU_KEY: 2, VM_CURRENT_CPU_MHZ_KEY: 4200.0,
+                   VM_RECOMMENDED_CPU_MHZ_KEY: 4200.0,
+                   VM_CURRENT_MEM_KB_KEY: 4194304.0, VM_RECOMMENDED_MEM_KB_KEY: 4194304.0},
+        },
+    )
+    monkeypatch.setattr(reports_mod, "_build_client", lambda args: c)
+    monkeypatch.setattr(reports_mod, "_site_map", lambda: SiteMap({}))
+    res = asyncio.run(reports_mod._vrops_oversized_vms_report({}))
+    assert res.success
+    vms = res.raw["vms"]
+    assert [v["vm"] for v in vms] == ["BIG"]  # only BIG is oversized
+    assert vms[0]["reclaimable_vcpu"] == 2.0
+    assert vms[0]["reclaimable_mem_gb"] == 4.0
+
+
+def test_oversized_report_unknown_location_errors(monkeypatch):
+    monkeypatch.setattr(reports_mod, "_build_client", lambda args: FakeClient())
+    monkeypatch.setattr(reports_mod, "_site_map", lambda: SiteMap({"Madrid": ["dc-mad"]}))
+    res = asyncio.run(reports_mod._vrops_oversized_vms_report({"location": "Lisbon"}))
+    assert res.success is False
+    assert "Madrid" in res.summary and "Lisbon" in res.summary
+
+
+def test_cluster_report_returns_error_on_client_failure(monkeypatch):
+    class Boom(FakeClient):
+        def list_resources_by_kind(self, *a, **k):
+            raise RuntimeError("vROps 503")
+    monkeypatch.setattr(reports_mod, "_build_client", lambda args: Boom())
+    monkeypatch.setattr(reports_mod, "_site_map", lambda: SiteMap({}))
+    res = asyncio.run(reports_mod._vrops_cluster_capacity_report({}))
+    assert res.success is False
+    assert "503" in res.summary
+
+
+def test_fleet_query_rejects_sort_by_not_in_stat_keys(monkeypatch):
+    monkeypatch.setattr(reports_mod, "_build_client", lambda args: FakeClient())
+    monkeypatch.setattr(reports_mod, "_site_map", lambda: SiteMap({}))
+    res = asyncio.run(reports_mod._vrops_fleet_query(
+        {"resource_kind": "HostSystem", "stat_keys": ["a"], "sort_by": "b"}))
+    assert res.success is False
+    assert "sort_by" in res.summary

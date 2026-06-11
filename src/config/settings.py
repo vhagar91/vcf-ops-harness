@@ -73,6 +73,7 @@ class HarnessConfig:
     vrops_username: str = ""
     vrops_password: str = ""
     vrops_auth_source: str = "Local"
+    vrops_site_map_file: str | None = None
 
     system_prompt: str = field(default_factory=lambda: DEFAULT_SYSTEM_PROMPT)
     max_conversation_turns: int = 50
@@ -142,6 +143,7 @@ def load_config() -> HarnessConfig:
         vrops_username=os.environ.get("VROPS_USERNAME", ""),
         vrops_password=os.environ.get("VROPS_PASSWORD", ""),
         vrops_auth_source=os.environ.get("VROPS_AUTH_SOURCE", "Local"),
+        vrops_site_map_file=os.environ.get("VROPS_SITE_MAP_FILE") or None,
         system_prompt=os.environ.get("SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT),
         max_conversation_turns=int(os.environ.get("MAX_CONVERSATION_TURNS", "50")),
         max_output_tokens=int(os.environ.get("MAX_OUTPUT_TOKENS", "800")),
