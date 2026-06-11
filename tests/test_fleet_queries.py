@@ -254,7 +254,8 @@ import asyncio
 from src.actions.registry import ActionRegistry
 from src.actions.builtin.vrops import reports as reports_mod
 from src.actions.builtin.vrops.analysis import (
-    CLUSTER_CAPACITY_REMAINING_PCT_KEY,
+    CLUSTER_CPU_REMAINING_KEY, CLUSTER_MEM_REMAINING_KEY, CLUSTER_DISK_REMAINING_KEY,
+    CLUSTER_CPU_USABLE_KEY, CLUSTER_MEM_USABLE_KEY, CLUSTER_DISK_USABLE_KEY,
     VM_CURRENT_VCPU_KEY, VM_CURRENT_CPU_MHZ_KEY, VM_RECOMMENDED_CPU_MHZ_KEY,
     VM_CURRENT_MEM_KB_KEY, VM_RECOMMENDED_MEM_KB_KEY,
 )
@@ -274,15 +275,25 @@ def test_report_actions_register_and_expose_to_openai():
     assert "vrops_cluster_capacity_report" in tool_names
 
 
-def test_cluster_capacity_report_ranks_least_free_first(monkeypatch):
+def _cluster_stats(cpu_rem, cpu_use, mem_rem, mem_use, dsk_rem, dsk_use):
+    return {
+        CLUSTER_CPU_REMAINING_KEY: cpu_rem, CLUSTER_CPU_USABLE_KEY: cpu_use,
+        CLUSTER_MEM_REMAINING_KEY: mem_rem, CLUSTER_MEM_USABLE_KEY: mem_use,
+        CLUSTER_DISK_REMAINING_KEY: dsk_rem, CLUSTER_DISK_USABLE_KEY: dsk_use,
+    }
+
+
+def test_cluster_capacity_report_ranks_by_tightest_type(monkeypatch):
     c = FakeClient(
         by_kind={"ClusterComputeResource": [
-            _r("c1", "LOW", "ClusterComputeResource"),
-            _r("c2", "HIGH", "ClusterComputeResource"),
+            _r("c1", "TIGHT", "ClusterComputeResource"),
+            _r("c2", "ROOMY", "ClusterComputeResource"),
         ]},
         stats={
-            "c1": {CLUSTER_CAPACITY_REMAINING_PCT_KEY: 5.0},
-            "c2": {CLUSTER_CAPACITY_REMAINING_PCT_KEY: 80.0},
+            # c1: memory is the bottleneck (10% remaining); cpu 50%, storage 80%
+            "c1": _cluster_stats(50.0, 100.0, 10.0, 100.0, 80.0, 100.0),
+            # c2: all types comfortable
+            "c2": _cluster_stats(90.0, 100.0, 95.0, 100.0, 99.0, 100.0),
         },
     )
     monkeypatch.setattr(reports_mod, "_build_client", lambda args: c)
@@ -290,8 +301,13 @@ def test_cluster_capacity_report_ranks_least_free_first(monkeypatch):
     res = asyncio.run(reports_mod._vrops_cluster_capacity_report({}))
     assert res.success
     clusters = res.raw["clusters"]
-    assert [x["cluster"] for x in clusters] == ["LOW", "HIGH"]
-    assert clusters[0]["free_capacity_pct"] == 5.0
+    assert [x["cluster"] for x in clusters] == ["TIGHT", "ROOMY"]
+    leader = clusters[0]
+    assert leader["bottleneck"] == "memory"
+    assert leader["least_free_pct"] == 10.0
+    assert leader["memory"]["capacity_remaining_pct"] == 10.0
+    assert leader["cpu"]["capacity_remaining_pct"] == 50.0
+    assert leader["storage"]["capacity_remaining_pct"] == 80.0
 
 
 def test_oversized_vms_report_flags_and_ranks(monkeypatch):

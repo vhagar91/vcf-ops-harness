@@ -195,22 +195,27 @@ def summarize_alerts(alerts: list[dict], top_n: int = 10,
 # family). Key availability is version-dependent; re-check with get_stat_keys
 # when porting to another Aria/vROps version.
 
-# Cluster capacity — primary ranking metric (overall % capacity remaining):
-CLUSTER_CAPACITY_REMAINING_PCT_KEY = "OnlineCapacityAnalytics|capacityRemainingPercentage"
-# Cluster usage % (drives the fallback free-capacity score and shown as detail):
+# Cluster capacity is reported BY TYPE (cpu / memory / storage), not as one conflated
+# number. Per-type "capacity remaining %" = capacityRemaining / usableCapacity — the
+# vROps capacity-engine view (after HA/buffer). Raw utilization % is shown alongside it.
+# All keys verified on the live instance.
+CLUSTER_OVERALL_REMAINING_PCT_KEY = "OnlineCapacityAnalytics|capacityRemainingPercentage"
+# Per-dimension remaining (absolute):
+CLUSTER_CPU_REMAINING_KEY = "OnlineCapacityAnalytics|cpu|demand|capacityRemaining"      # MHz
+CLUSTER_MEM_REMAINING_KEY = "OnlineCapacityAnalytics|mem|demand|capacityRemaining"      # KB
+CLUSTER_DISK_REMAINING_KEY = "OnlineCapacityAnalytics|diskspace|demand|capacityRemaining"  # GB
+# Per-dimension usable capacity (absolute):
+CLUSTER_CPU_USABLE_KEY = "cpu|demand|usableCapacity"        # MHz
+CLUSTER_MEM_USABLE_KEY = "mem|demand|usableCapacity"        # KB
+CLUSTER_DISK_USABLE_KEY = "diskspace|demand|usableCapacity"  # GB
+# Raw utilization % (mem|capacity_usagepct_average returns no data here; use usage_average):
 CLUSTER_CPU_USAGE_PCT_KEY = "cpu|capacity_usagepct_average"
-CLUSTER_MEM_USAGE_PCT_KEY = "mem|capacity_usagepct_average"
-# Cluster per-dimension remaining capacity (absolute units), shown as detail:
-CLUSTER_CPU_REMAINING_KEY = "OnlineCapacityAnalytics|cpu|demand|capacityRemaining"
-CLUSTER_MEM_REMAINING_KEY = "OnlineCapacityAnalytics|mem|demand|capacityRemaining"
-CLUSTER_DISK_REMAINING_KEY = "OnlineCapacityAnalytics|diskspace|demand|capacityRemaining"
+CLUSTER_MEM_USAGE_PCT_KEY = "mem|usage_average"
 CLUSTER_CAPACITY_KEYS = [
-    CLUSTER_CAPACITY_REMAINING_PCT_KEY,
-    CLUSTER_CPU_USAGE_PCT_KEY,
-    CLUSTER_MEM_USAGE_PCT_KEY,
-    CLUSTER_CPU_REMAINING_KEY,
-    CLUSTER_MEM_REMAINING_KEY,
-    CLUSTER_DISK_REMAINING_KEY,
+    CLUSTER_OVERALL_REMAINING_PCT_KEY,
+    CLUSTER_CPU_REMAINING_KEY, CLUSTER_MEM_REMAINING_KEY, CLUSTER_DISK_REMAINING_KEY,
+    CLUSTER_CPU_USABLE_KEY, CLUSTER_MEM_USABLE_KEY, CLUSTER_DISK_USABLE_KEY,
+    CLUSTER_CPU_USAGE_PCT_KEY, CLUSTER_MEM_USAGE_PCT_KEY,
 ]
 
 # VM rightsizing — current vs vROps-recommended (verified keys):
@@ -241,6 +246,14 @@ def free_capacity_score(remaining_pcts: list[float | None]) -> float | None:
     if not present:
         return None
     return round(min(present), 2)
+
+
+def pct_remaining(remaining: float | None, usable: float | None) -> float | None:
+    """Capacity-remaining percentage for one dimension = remaining / usable * 100.
+    None if either value is missing or usable is non-positive."""
+    if remaining is None or not usable or usable <= 0:
+        return None
+    return round(remaining / usable * 100.0, 1)
 
 
 def oversize_score(vcpu_reclaimable: float | None,

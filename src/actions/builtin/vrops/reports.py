@@ -13,12 +13,15 @@ from .fleet import build_rows, UnknownLocation
 from .analysis import (
     _KB_PER_GB,
     CLUSTER_CAPACITY_KEYS,
-    CLUSTER_CAPACITY_REMAINING_PCT_KEY,
+    CLUSTER_OVERALL_REMAINING_PCT_KEY,
     CLUSTER_CPU_USAGE_PCT_KEY,
     CLUSTER_MEM_USAGE_PCT_KEY,
     CLUSTER_CPU_REMAINING_KEY,
     CLUSTER_MEM_REMAINING_KEY,
     CLUSTER_DISK_REMAINING_KEY,
+    CLUSTER_CPU_USABLE_KEY,
+    CLUSTER_MEM_USABLE_KEY,
+    CLUSTER_DISK_USABLE_KEY,
     VM_RIGHTSIZING_KEYS,
     VM_CURRENT_VCPU_KEY,
     VM_CURRENT_CPU_MHZ_KEY,
@@ -29,6 +32,7 @@ from .analysis import (
     oversize_score,
     reclaimable_vcpu,
     reclaimable_mem_gb,
+    pct_remaining,
 )
 
 def _site_map() -> SiteMap:
@@ -76,27 +80,43 @@ async def _vrops_cluster_capacity_report(args: dict) -> ActionResult:
         scored = []
         for r in rows:
             s = r["stats"]
-            cpu_usage = _num(s, CLUSTER_CPU_USAGE_PCT_KEY)
-            mem_usage = _num(s, CLUSTER_MEM_USAGE_PCT_KEY)
-            # Primary metric: vROps' own overall capacity-remaining %. Fallback
-            # when absent: bottleneck of (100 - usage%) across cpu/mem.
-            score = _num(s, CLUSTER_CAPACITY_REMAINING_PCT_KEY)
-            if score is None:
-                score = free_capacity_score([
-                    None if cpu_usage is None else 100.0 - cpu_usage,
-                    None if mem_usage is None else 100.0 - mem_usage,
-                ])
-            if score is None:
+            cpu_rem_pct = pct_remaining(_num(s, CLUSTER_CPU_REMAINING_KEY), _num(s, CLUSTER_CPU_USABLE_KEY))
+            mem_rem_pct = pct_remaining(_num(s, CLUSTER_MEM_REMAINING_KEY), _num(s, CLUSTER_MEM_USABLE_KEY))
+            disk_rem_pct = pct_remaining(_num(s, CLUSTER_DISK_REMAINING_KEY), _num(s, CLUSTER_DISK_USABLE_KEY))
+            by_type = {"cpu": cpu_rem_pct, "memory": mem_rem_pct, "storage": disk_rem_pct}
+            present = {k: v for k, v in by_type.items() if v is not None}
+            # Bottleneck = the tightest type; the cluster's free capacity is gated by it.
+            least_free = free_capacity_score(list(present.values())) if present else None
+            if least_free is None:
                 continue
+            bottleneck = min(present, key=present.get)
+
+            mem_rem_kb = _num(s, CLUSTER_MEM_REMAINING_KEY)
+            mem_usable_kb = _num(s, CLUSTER_MEM_USABLE_KEY)
             scored.append({
                 "cluster": r["name"],
-                "free_capacity_pct": round(score, 2),
-                "cpu_usage_pct": cpu_usage,
-                "mem_usage_pct": mem_usage,
-                "cpu_remaining": _num(s, CLUSTER_CPU_REMAINING_KEY),
-                "mem_remaining": _num(s, CLUSTER_MEM_REMAINING_KEY),
-                "disk_remaining": _num(s, CLUSTER_DISK_REMAINING_KEY),
                 "health": r["health"],
+                "bottleneck": bottleneck,
+                "least_free_pct": least_free,
+                "vrops_overall_remaining_pct": _num(s, CLUSTER_OVERALL_REMAINING_PCT_KEY),
+                "cpu": {
+                    "capacity_remaining_pct": cpu_rem_pct,
+                    "usage_pct": _num(s, CLUSTER_CPU_USAGE_PCT_KEY),
+                    "remaining_mhz": _num(s, CLUSTER_CPU_REMAINING_KEY),
+                    "usable_mhz": _num(s, CLUSTER_CPU_USABLE_KEY),
+                },
+                "memory": {
+                    "capacity_remaining_pct": mem_rem_pct,
+                    "usage_pct": _num(s, CLUSTER_MEM_USAGE_PCT_KEY),
+                    "remaining_gb": round(mem_rem_kb / _KB_PER_GB, 2) if mem_rem_kb is not None else None,
+                    "usable_gb": round(mem_usable_kb / _KB_PER_GB, 2) if mem_usable_kb is not None else None,
+                },
+                "storage": {
+                    "capacity_remaining_pct": disk_rem_pct,
+                    "usage_pct": round(100.0 - disk_rem_pct, 1) if disk_rem_pct is not None else None,
+                    "remaining_gb": _num(s, CLUSTER_DISK_REMAINING_KEY),
+                    "usable_gb": _num(s, CLUSTER_DISK_USABLE_KEY),
+                },
             })
 
         if not scored:
@@ -106,22 +126,29 @@ async def _vrops_cluster_capacity_report(args: dict) -> ActionResult:
                                 raw={"clusters": [], "location": location})
 
         reverse = (sort == "most_free")
-        scored.sort(key=lambda c: c["free_capacity_pct"], reverse=reverse)
+        scored.sort(key=lambda c: c["least_free_pct"], reverse=reverse)
         top = scored[:top_n]
         leader = top[0]
-        descriptor = "most" if reverse else "fewest"
-        headline = (f"{leader['cluster']} has the {descriptor} free capacity"
-                    + (f" in {location}" if location else "")
-                    + f" ({leader['free_capacity_pct']}% remaining).")
+        descriptor = "most" if reverse else "least"
+        b = leader["bottleneck"]
+        headline = (
+            f"{leader['cluster']} has the {descriptor} free capacity"
+            + (f" in {location}" if location else "")
+            + f" — most constrained on {b} ({leader['least_free_pct']}% capacity remaining). "
+            + f"By type: cpu {leader['cpu']['capacity_remaining_pct']}%, "
+            + f"memory {leader['memory']['capacity_remaining_pct']}%, "
+            + f"storage {leader['storage']['capacity_remaining_pct']}% remaining."
+        )
         return ActionResult(success=True, summary=headline,
                             raw={"location": location, "sort": sort,
                                  "shown": len(top), "total_clusters": len(scored),
+                                 "note": ("capacity_remaining_pct is the vROps capacity-engine "
+                                          "view (after HA/buffer); usage_pct is raw utilization."),
                                  "clusters": top})
     except UnknownLocation as e:
         return _unknown_location_result(e)
     except Exception as e:
-        return ActionResult(success=False,
-                            summary=f"Cluster capacity report failed: {e}")
+        return ActionResult(success=False, summary=f"Cluster capacity report failed: {e}")
 
 
 async def _vrops_oversized_vms_report(args: dict) -> ActionResult:
