@@ -202,3 +202,9 @@ def test_placement_action_registered_shape():
     assert P.vrops_placement_action.name == "vrops_placement_recommendation"
     props = P.vrops_placement_action.input_schema["properties"]
     assert "vcpu" in props and "memory_gb" in props and "location" in props
+
+
+def test_placement_action_imported_in_main():
+    import src.main as main_mod
+    assert hasattr(main_mod, "vrops_placement_action")
+    assert main_mod.vrops_placement_action.name == "vrops_placement_recommendation"
