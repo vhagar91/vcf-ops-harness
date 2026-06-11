@@ -118,3 +118,131 @@ def test_sitemap_from_file_malformed_json_is_empty(tmp_path):
     p = tmp_path / "sites.json"
     p.write_text("{ this is not valid json", encoding="utf-8")
     assert SiteMap.from_file(str(p)).known_locations() == []
+
+
+import pytest
+
+from src.actions.builtin.vrops.fleet import (
+    resolve_scope,
+    attach_stats,
+    build_rows,
+    collect_descendants,
+    UnknownLocation,
+)
+
+
+class FakeClient:
+    """Stub implementing only what fleet.py calls, with call recording.
+
+    tree: {parent_id: [child resource dicts]} models the CHILD hierarchy.
+    """
+
+    def __init__(self, tree=None, datacenters=None, by_kind=None, stats=None):
+        self._tree = tree or {}
+        self._datacenters = datacenters or {}   # dc_name -> [{"identifier": ...}]
+        self._by_kind = by_kind or {}           # kind -> [resource dicts]
+        self._stats = stats or {}               # id -> {stat_key: value}
+        self.stats_requested_ids = None
+        self.child_calls = []
+
+    def list_resources_by_kind(self, resource_kind, adapter_kind="VMWARE"):
+        return self._by_kind.get(resource_kind, [])
+
+    def search_resources(self, name, resource_kind=None, adapter_kind=None):
+        return self._datacenters.get(name, [])
+
+    def get_child_resources(self, resource_id, resource_kind=None, page_size=1000):
+        self.child_calls.append(resource_id)
+        kids = self._tree.get(resource_id, [])
+        if resource_kind:
+            kids = [k for k in kids if k.get("resourceKind") == resource_kind]
+        return kids
+
+    def get_latest_stats_bulk(self, resource_ids, stat_keys, chunk_size=100):
+        self.stats_requested_ids = list(resource_ids)
+        return {i: self._stats.get(i, {}) for i in resource_ids}
+
+
+def _r(rid, name, kind):
+    return {"identifier": rid, "name": name, "resourceKind": kind, "health": "GREEN"}
+
+
+def test_resolve_scope_no_location_enumerates_whole_kind():
+    c = FakeClient(by_kind={"ClusterComputeResource": [_r("c1", "A", "ClusterComputeResource")]})
+    out = resolve_scope(c, SiteMap({}), None, "ClusterComputeResource")
+    assert [r["identifier"] for r in out] == ["c1"]
+
+
+def test_resolve_scope_unknown_location_raises():
+    with pytest.raises(UnknownLocation) as e:
+        resolve_scope(FakeClient(), SiteMap({"Madrid": ["dc-mad"]}), "Lisbon",
+                      "ClusterComputeResource")
+    assert e.value.location == "Lisbon"
+    assert e.value.known == ["Madrid"]
+
+
+def test_resolve_scope_clusters_are_direct_datacenter_children():
+    c = FakeClient(
+        datacenters={"dc-mad": [{"identifier": "DC1"}]},
+        tree={"DC1": [_r("cl1", "MAD-CLU", "ClusterComputeResource"),
+                      _r("ds1", "store", "Datastore")]},
+    )
+    out = resolve_scope(c, SiteMap({"Madrid": ["dc-mad"]}), "Madrid", "ClusterComputeResource")
+    assert [r["name"] for r in out] == ["MAD-CLU"]
+    # The cluster is the target kind, so we must NOT descend into it.
+    assert "cl1" not in c.child_calls
+
+
+def test_collect_descendants_walks_through_containers_to_vms():
+    c = FakeClient(tree={
+        "DC1": [_r("f1", "vmfolder", "VMFolder"), _r("cl1", "clu", "ClusterComputeResource")],
+        "f1": [_r("vm1", "app01", "VirtualMachine")],
+        "cl1": [_r("h1", "host", "HostSystem")],
+        "h1": [_r("vm2", "app02", "VirtualMachine")],
+    })
+    out = collect_descendants(c, ["DC1"], "VirtualMachine")
+    assert sorted(r["name"] for r in out) == ["app01", "app02"]
+
+
+def test_collect_descendants_dedupes_across_paths():
+    c = FakeClient(tree={
+        "DC1": [_r("f1", "folder", "VMFolder"), _r("f2", "folder2", "VMFolder")],
+        "f1": [_r("vm1", "dup", "VirtualMachine")],
+        "f2": [_r("vm1", "dup", "VirtualMachine"), _r("vm3", "only", "VirtualMachine")],
+    })
+    out = collect_descendants(c, ["DC1"], "VirtualMachine")
+    assert sorted(r["identifier"] for r in out) == ["vm1", "vm3"]
+
+
+def test_collect_descendants_respects_depth_cap():
+    c = FakeClient(tree={
+        "DC1": [_r("a", "a", "VMFolder")],
+        "a": [_r("b", "b", "VMFolder")],
+        "b": [_r("vm", "leaf", "VirtualMachine")],
+    })
+    out = collect_descendants(c, ["DC1"], "VirtualMachine", max_depth=1)
+    assert out == []
+
+
+def test_attach_stats_only_fetches_in_scope_ids():
+    c = FakeClient(stats={"c1": {"k": 12.0}})
+    rows = attach_stats(c, [_r("c1", "A", "ClusterComputeResource")], ["k"])
+    assert c.stats_requested_ids == ["c1"]
+    assert rows[0]["stats"]["k"] == 12.0
+    assert rows[0]["name"] == "A"
+
+
+def test_build_rows_resolves_then_fetches():
+    c = FakeClient(
+        by_kind={"ClusterComputeResource": [_r("c1", "A", "ClusterComputeResource"),
+                                            _r("c2", "B", "ClusterComputeResource")]},
+        stats={"c1": {"k": 1.0}, "c2": {"k": 2.0}},
+    )
+    rows = build_rows(c, SiteMap({}), None, "ClusterComputeResource", ["k"])
+    assert {r["name"]: r["stats"]["k"] for r in rows} == {"A": 1.0, "B": 2.0}
+
+
+def test_attach_stats_skips_resources_without_id():
+    c = FakeClient(stats={"c1": {"k": 1.0}})
+    rows = attach_stats(c, [_r("c1", "A", "ClusterComputeResource"), {"name": "ghost"}], ["k"])
+    assert [r["id"] for r in rows] == ["c1"]
