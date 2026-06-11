@@ -103,13 +103,20 @@ Registered in `src/main.py` via `registry.register(...)`; exposed to both provid
 
 - **Params:** `location` (optional; omit = all sites), `top_n` (default 5),
   `sort` (`least_free` | `most_free`, default `least_free`).
-- **Behavior:** scope `ClusterComputeResource` → bulk-fetch capacity stats → rank by
-  free capacity. **Primary ranking metric:** `OnlineCapacityAnalytics|capacityRemainingPercentage`
-  (vROps' own bottleneck %, lower = less free). Fallback when absent: `free_capacity_score`
-  over `[100 − cpu|capacity_usagepct_average, 100 − mem|capacity_usagepct_average]`.
-- **Returns:** ranked rows of `cluster name, site, capacity-remaining %, cpu/mem usage %,
-  per-dimension demand capacity-remaining (cpu/mem/diskspace), health`.
-- Answers "which cluster has the fewest free resources in Madrid."
+- **Behavior:** scope `ClusterComputeResource` → bulk-fetch capacity stats → report
+  capacity **by type (cpu / memory / storage)**, not one conflated number. Per type:
+  `capacity_remaining_pct = capacityRemaining / usableCapacity` (vROps capacity-engine
+  view, after HA/buffer) **and** raw `usage_pct`. The **bottleneck** is the tightest type;
+  clusters are ranked by `least_free_pct = min(per-type capacity_remaining_pct)` (via
+  `free_capacity_score`). Keys: `OnlineCapacityAnalytics|{cpu,mem,diskspace}|demand|capacityRemaining`,
+  `{cpu,mem,diskspace}|demand|usableCapacity`, `cpu|capacity_usagepct_average`,
+  `mem|usage_average` (the working mem-usage key — `mem|capacity_usagepct_average` returns
+  no data), and the overall `OnlineCapacityAnalytics|capacityRemainingPercentage` for reference.
+- **Returns:** ranked rows with `cluster, health, bottleneck, least_free_pct`,
+  `vrops_overall_remaining_pct`, and `cpu`/`memory`/`storage` sub-objects each carrying
+  `capacity_remaining_pct`, `usage_pct`, and absolute remaining/usable.
+- Answers "which cluster has the fewest free resources in Madrid" — and names *which
+  resource type* is constrained (e.g. memory-bound at 0% while CPU has 71% free).
 
 ### 2. `vrops_oversized_vms_report`
 
