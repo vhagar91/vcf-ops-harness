@@ -65,7 +65,40 @@ def _coerce_bool(value, default: bool = True) -> bool:
     return bool(value)
 
 
-async def _vrops_cluster_capacity_report(args: dict) -> ActionResult:
+def _capacity_dimension(stats: dict, remaining_key: str, usable_key: str,
+                        usage_key: str | None, to_gb: bool = False):
+    """One capacity dimension (cpu/memory/storage) for a cluster or host.
+
+    Prefer the vROps capacity-engine view (remaining / usable, after HA/buffer);
+    fall back to raw headroom (100 - usage%) when usable capacity isn't published
+    for this object kind — ESXi hosts don't publish usableCapacity. Returns
+    (capacity_remaining_pct_or_None, detail_dict).
+    """
+    remaining = _num(stats, remaining_key)
+    usable = _num(stats, usable_key)
+    usage = _num(stats, usage_key) if usage_key else None
+    pct = pct_remaining(remaining, usable)
+    basis = "capacity-engine"
+    if pct is None and usage is not None:
+        pct = round(100.0 - usage, 1)
+        basis = "raw-headroom"
+    detail = {
+        "capacity_remaining_pct": pct,
+        "basis": basis if pct is not None else None,
+        "usage_pct": usage,
+    }
+    if to_gb:
+        detail["remaining_gb"] = round(remaining / _KB_PER_GB, 2) if remaining is not None else None
+        detail["usable_gb"] = round(usable / _KB_PER_GB, 2) if usable is not None else None
+    else:
+        detail["remaining"] = remaining
+        detail["usable"] = usable
+    return pct, detail
+
+
+async def _capacity_report(args: dict, resource_kind: str, label: str) -> ActionResult:
+    """Shared capacity report for clusters and ESXi hosts: capacity broken down by
+    type (cpu/memory/storage), ranked by the tightest type."""
     try:
         client = _build_client(args)
     except Exception as e:
@@ -74,56 +107,36 @@ async def _vrops_cluster_capacity_report(args: dict) -> ActionResult:
         location = args.get("location")
         top_n = int(args.get("top_n", 5))
         sort = args.get("sort", "least_free")
-        rows = build_rows(client, _site_map(), location,
-                          "ClusterComputeResource", CLUSTER_CAPACITY_KEYS)
+        rows = build_rows(client, _site_map(), location, resource_kind, CLUSTER_CAPACITY_KEYS)
 
         scored = []
         for r in rows:
             s = r["stats"]
-            cpu_rem_pct = pct_remaining(_num(s, CLUSTER_CPU_REMAINING_KEY), _num(s, CLUSTER_CPU_USABLE_KEY))
-            mem_rem_pct = pct_remaining(_num(s, CLUSTER_MEM_REMAINING_KEY), _num(s, CLUSTER_MEM_USABLE_KEY))
-            disk_rem_pct = pct_remaining(_num(s, CLUSTER_DISK_REMAINING_KEY), _num(s, CLUSTER_DISK_USABLE_KEY))
-            by_type = {"cpu": cpu_rem_pct, "memory": mem_rem_pct, "storage": disk_rem_pct}
+            cpu_pct, cpu = _capacity_dimension(s, CLUSTER_CPU_REMAINING_KEY, CLUSTER_CPU_USABLE_KEY, CLUSTER_CPU_USAGE_PCT_KEY)
+            mem_pct, mem = _capacity_dimension(s, CLUSTER_MEM_REMAINING_KEY, CLUSTER_MEM_USABLE_KEY, CLUSTER_MEM_USAGE_PCT_KEY, to_gb=True)
+            dsk_pct, dsk = _capacity_dimension(s, CLUSTER_DISK_REMAINING_KEY, CLUSTER_DISK_USABLE_KEY, None)
+            if dsk["usage_pct"] is None and dsk_pct is not None:
+                dsk["usage_pct"] = round(100.0 - dsk_pct, 1)
+            by_type = {"cpu": cpu_pct, "memory": mem_pct, "storage": dsk_pct}
             present = {k: v for k, v in by_type.items() if v is not None}
-            # Bottleneck = the tightest type; the cluster's free capacity is gated by it.
             least_free = free_capacity_score(list(present.values())) if present else None
             if least_free is None:
                 continue
             bottleneck = min(present, key=present.get)
-
-            mem_rem_kb = _num(s, CLUSTER_MEM_REMAINING_KEY)
-            mem_usable_kb = _num(s, CLUSTER_MEM_USABLE_KEY)
             scored.append({
-                "cluster": r["name"],
+                "name": r["name"],
                 "health": r["health"],
                 "bottleneck": bottleneck,
                 "least_free_pct": least_free,
                 "vrops_overall_remaining_pct": _num(s, CLUSTER_OVERALL_REMAINING_PCT_KEY),
-                "cpu": {
-                    "capacity_remaining_pct": cpu_rem_pct,
-                    "usage_pct": _num(s, CLUSTER_CPU_USAGE_PCT_KEY),
-                    "remaining_mhz": _num(s, CLUSTER_CPU_REMAINING_KEY),
-                    "usable_mhz": _num(s, CLUSTER_CPU_USABLE_KEY),
-                },
-                "memory": {
-                    "capacity_remaining_pct": mem_rem_pct,
-                    "usage_pct": _num(s, CLUSTER_MEM_USAGE_PCT_KEY),
-                    "remaining_gb": round(mem_rem_kb / _KB_PER_GB, 2) if mem_rem_kb is not None else None,
-                    "usable_gb": round(mem_usable_kb / _KB_PER_GB, 2) if mem_usable_kb is not None else None,
-                },
-                "storage": {
-                    "capacity_remaining_pct": disk_rem_pct,
-                    "usage_pct": round(100.0 - disk_rem_pct, 1) if disk_rem_pct is not None else None,
-                    "remaining_gb": _num(s, CLUSTER_DISK_REMAINING_KEY),
-                    "usable_gb": _num(s, CLUSTER_DISK_USABLE_KEY),
-                },
+                "cpu": cpu, "memory": mem, "storage": dsk,
             })
 
         if not scored:
             scope = f" in {location}" if location else ""
             return ActionResult(success=True,
-                                summary=f"No cluster capacity data available{scope}.",
-                                raw={"clusters": [], "location": location})
+                                summary=f"No {label} capacity data available{scope}.",
+                                raw={"object": label, "location": location, "items": []})
 
         reverse = (sort == "most_free")
         scored.sort(key=lambda c: c["least_free_pct"], reverse=reverse)
@@ -132,23 +145,32 @@ async def _vrops_cluster_capacity_report(args: dict) -> ActionResult:
         descriptor = "most" if reverse else "least"
         b = leader["bottleneck"]
         headline = (
-            f"{leader['cluster']} has the {descriptor} free capacity"
+            f"{leader['name']} has the {descriptor} free capacity of any {label}"
             + (f" in {location}" if location else "")
-            + f" — most constrained on {b} ({leader['least_free_pct']}% capacity remaining). "
+            + f" — most constrained on {b} ({leader['least_free_pct']}% remaining). "
             + f"By type: cpu {leader['cpu']['capacity_remaining_pct']}%, "
             + f"memory {leader['memory']['capacity_remaining_pct']}%, "
             + f"storage {leader['storage']['capacity_remaining_pct']}% remaining."
         )
         return ActionResult(success=True, summary=headline,
-                            raw={"location": location, "sort": sort,
-                                 "shown": len(top), "total_clusters": len(scored),
-                                 "note": ("capacity_remaining_pct is the vROps capacity-engine "
-                                          "view (after HA/buffer); usage_pct is raw utilization."),
-                                 "clusters": top})
+                            raw={"object": label, "location": location, "sort": sort,
+                                 "shown": len(top), "total": len(scored),
+                                 "note": ("capacity_remaining_pct basis is 'capacity-engine' "
+                                          "(vROps remaining/usable, after HA/buffer) where published, "
+                                          "else 'raw-headroom' (100 - usage%); usage_pct is raw utilization."),
+                                 "items": top})
     except UnknownLocation as e:
         return _unknown_location_result(e)
     except Exception as e:
-        return ActionResult(success=False, summary=f"Cluster capacity report failed: {e}")
+        return ActionResult(success=False, summary=f"{label.capitalize()} capacity report failed: {e}")
+
+
+async def _vrops_cluster_capacity_report(args: dict) -> ActionResult:
+    return await _capacity_report(args, "ClusterComputeResource", "cluster")
+
+
+async def _vrops_host_capacity_report(args: dict) -> ActionResult:
+    return await _capacity_report(args, "HostSystem", "host")
 
 
 async def _vrops_oversized_vms_report(args: dict) -> ActionResult:
@@ -253,10 +275,10 @@ vrops_report_actions: list[ActionDefinition] = [
         name="vrops_cluster_capacity_report",
         description=(
             "Rank clusters by free capacity across a site or the whole estate in ONE "
-            "call. Use for 'which cluster has the most/least free resources', "
-            "'capacity report', or 'where can I place new workloads'. Optionally filter "
-            "by physical location (e.g. 'Madrid'). Returns a ranked report; narrate the "
-            "leader and the notable rows."
+            "call. Use for 'which cluster has the most/least free resources/capacity'. "
+            "Capacity is broken down by type (cpu/memory/storage). Optionally filter by "
+            "physical location (e.g. 'lab', 'Madrid') via the location param — a site "
+            "name is NOT a cluster name. Returns a ranked report naming the bottleneck type."
         ),
         input_schema={
             "type": "object",
@@ -267,6 +289,26 @@ vrops_report_actions: list[ActionDefinition] = [
             },
         },
         handler=_vrops_cluster_capacity_report,
+    ),
+    ActionDefinition(
+        name="vrops_host_capacity_report",
+        description=(
+            "Rank ESXi / hypervisor hosts (HostSystem) by free capacity across a site "
+            "or the whole estate in ONE call. Use for 'which ESXi host / hypervisor has "
+            "the most/least free resources/capacity'. Capacity is broken down by type "
+            "(cpu/memory/storage). Optionally filter by physical location (e.g. 'lab', "
+            "'Madrid') via the location param — a site name is NOT a host name. Returns "
+            "a ranked report naming the bottleneck type."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "location": {"type": "string", "description": "Physical site to filter by, e.g. 'lab'. Omit for all sites."},
+                "top_n": {"type": "integer", "description": "How many hosts to return", "default": 5},
+                "sort": {"type": "string", "enum": ["least_free", "most_free"], "default": "least_free"},
+            },
+        },
+        handler=_vrops_host_capacity_report,
     ),
     ActionDefinition(
         name="vrops_oversized_vms_report",

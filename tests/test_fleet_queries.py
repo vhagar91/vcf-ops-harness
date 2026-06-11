@@ -256,6 +256,7 @@ from src.actions.builtin.vrops import reports as reports_mod
 from src.actions.builtin.vrops.analysis import (
     CLUSTER_CPU_REMAINING_KEY, CLUSTER_MEM_REMAINING_KEY, CLUSTER_DISK_REMAINING_KEY,
     CLUSTER_CPU_USABLE_KEY, CLUSTER_MEM_USABLE_KEY, CLUSTER_DISK_USABLE_KEY,
+    CLUSTER_CPU_USAGE_PCT_KEY, CLUSTER_MEM_USAGE_PCT_KEY,
     VM_CURRENT_VCPU_KEY, VM_CURRENT_CPU_MHZ_KEY, VM_RECOMMENDED_CPU_MHZ_KEY,
     VM_CURRENT_MEM_KB_KEY, VM_RECOMMENDED_MEM_KB_KEY,
 )
@@ -265,6 +266,7 @@ def test_report_actions_register_and_expose_to_openai():
     names = {a.name for a in reports_mod.vrops_report_actions}
     assert names == {
         "vrops_cluster_capacity_report",
+        "vrops_host_capacity_report",
         "vrops_oversized_vms_report",
         "vrops_fleet_query",
     }
@@ -300,14 +302,39 @@ def test_cluster_capacity_report_ranks_by_tightest_type(monkeypatch):
     monkeypatch.setattr(reports_mod, "_site_map", lambda: SiteMap({}))
     res = asyncio.run(reports_mod._vrops_cluster_capacity_report({}))
     assert res.success
-    clusters = res.raw["clusters"]
-    assert [x["cluster"] for x in clusters] == ["TIGHT", "ROOMY"]
+    clusters = res.raw["items"]
+    assert [x["name"] for x in clusters] == ["TIGHT", "ROOMY"]
     leader = clusters[0]
     assert leader["bottleneck"] == "memory"
     assert leader["least_free_pct"] == 10.0
     assert leader["memory"]["capacity_remaining_pct"] == 10.0
     assert leader["cpu"]["capacity_remaining_pct"] == 50.0
     assert leader["storage"]["capacity_remaining_pct"] == 80.0
+
+
+def test_host_capacity_report_falls_back_to_raw_headroom(monkeypatch):
+    # Hosts publish usage % but NOT usableCapacity, so % remaining = 100 - usage.
+    c = FakeClient(
+        by_kind={"HostSystem": [
+            _r("h1", "esx-01a", "HostSystem"),
+            _r("h2", "esx-02a", "HostSystem"),
+        ]},
+        stats={
+            "h1": {CLUSTER_CPU_USAGE_PCT_KEY: 20.0, CLUSTER_MEM_USAGE_PCT_KEY: 90.0},
+            "h2": {CLUSTER_CPU_USAGE_PCT_KEY: 10.0, CLUSTER_MEM_USAGE_PCT_KEY: 30.0},
+        },
+    )
+    monkeypatch.setattr(reports_mod, "_build_client", lambda args: c)
+    monkeypatch.setattr(reports_mod, "_site_map", lambda: SiteMap({}))
+    res = asyncio.run(reports_mod._vrops_host_capacity_report({}))
+    assert res.success
+    items = res.raw["items"]
+    assert [x["name"] for x in items] == ["esx-01a", "esx-02a"]
+    leader = items[0]
+    assert leader["bottleneck"] == "memory"
+    assert leader["memory"]["capacity_remaining_pct"] == 10.0   # 100 - 90
+    assert leader["memory"]["basis"] == "raw-headroom"
+    assert leader["cpu"]["capacity_remaining_pct"] == 80.0       # 100 - 20
 
 
 def test_oversized_vms_report_flags_and_ranks(monkeypatch):

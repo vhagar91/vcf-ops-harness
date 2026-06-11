@@ -38,12 +38,15 @@ DEFAULT_SYSTEM_PROMPT = (
     "verdict headline, then health, then only the notable (breaching or trending) "
     "metrics, then the recommendations. State only numbers and names present in "
     "the report; never add values that are not in it.\n"
-    "- For FLEET / ranking questions across many resources ('which cluster has the "
-    "most/least free capacity', 'oversized VMs', 'rightsizing report', optionally "
-    "scoped to a site like 'Madrid'), use vrops_cluster_capacity_report or "
-    "vrops_oversized_vms_report (or vrops_fleet_query for ad-hoc metric rankings). "
-    "These return one ranked report — do NOT enumerate resources one by one. If a "
-    "report says the location is unknown, tell the user the known sites it lists."
+    "- For FLEET / ranking questions across many resources, use the report tools and "
+    "do NOT enumerate resources one by one: 'which CLUSTER has most/least free "
+    "capacity' -> vrops_cluster_capacity_report; 'which ESXi HOST/hypervisor has "
+    "most/least free capacity' -> vrops_host_capacity_report; 'oversized VMs' / "
+    "'rightsizing' -> vrops_oversized_vms_report; other ad-hoc 'rank all X by metric "
+    "Y' -> vrops_fleet_query. A physical SITE name (e.g. 'lab', 'Madrid') is a "
+    "LOCATION: pass it as the report's location parameter — never search for it as a "
+    "resource name. If a report says the location is unknown, tell the user the known "
+    "sites it lists."
 )
 
 
