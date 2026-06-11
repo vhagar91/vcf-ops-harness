@@ -37,7 +37,13 @@ DEFAULT_SYSTEM_PROMPT = (
     "- When narrating a vrops_diagnose report, follow this template: a one-line "
     "verdict headline, then health, then only the notable (breaching or trending) "
     "metrics, then the recommendations. State only numbers and names present in "
-    "the report; never add values that are not in it."
+    "the report; never add values that are not in it.\n"
+    "- For FLEET / ranking questions across many resources ('which cluster has the "
+    "most/least free capacity', 'oversized VMs', 'rightsizing report', optionally "
+    "scoped to a site like 'Madrid'), use vrops_cluster_capacity_report or "
+    "vrops_oversized_vms_report (or vrops_fleet_query for ad-hoc metric rankings). "
+    "These return one ranked report — do NOT enumerate resources one by one. If a "
+    "report says the location is unknown, tell the user the known sites it lists."
 )
 
 
