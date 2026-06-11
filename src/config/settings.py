@@ -47,6 +47,11 @@ DEFAULT_SYSTEM_PROMPT = (
     "LOCATION: pass it as the report's location parameter — never search for it as a "
     "resource name. If a report says the location is unknown, tell the user the known "
     "sites it lists."
+    "\n"
+    "- For PLACEMENT questions ('where should I place / put a VM of N vCPU and M GB', "
+    "'best host for a new VM', optionally in a site), use vrops_placement_recommendation "
+    "with vcpu, memory_gb, and (optional) location. Report the recommended host/cluster, "
+    "or if nothing fits, the blocking resource (cpu/memory) and the closest option."
 )
 
 
