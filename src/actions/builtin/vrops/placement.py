@@ -1,9 +1,10 @@
 """vrops_placement_recommendation — given a requested VM size (vCPU + memory GB),
-recommend the best cluster and host to place it on, in one call.
+recommend the best host to place it on, in one call.
 
-Two-stage: rank fitting clusters in the location, pick the best, then rank the
-hosts beneath it. Fit uses the vROps capacity-engine view (post-HA/buffer); raw
-headroom is reported alongside. 'Best' = most bottleneck headroom after placement.
+Evaluates candidate hosts across all clusters in scope (a site, or the whole
+estate) and picks the host with the most bottleneck headroom remaining after the
+VM lands. Fit uses the vROps capacity-engine view (post-HA/buffer); raw headroom is
+reported alongside. The chosen host's cluster is reported for context.
 """
 
 from __future__ import annotations
@@ -124,11 +125,8 @@ async def _vrops_placement_recommendation(args: dict) -> ActionResult:
                                      "request": {"vcpu": vcpu, "memory_gb": memory_gb},
                                      "recommended": {"cluster": None, "host": None, "fits": False},
                                      "candidates": []})
-        clusters = []
-        for r in cl_rows:
-            ev = _evaluate(r["stats"], vcpu, memory_gb)
-            clusters.append({"cluster": r["name"], "id": r["id"], **ev})
-        clusters.sort(key=_rank_key, reverse=True)
+        # Only id/name are needed — hosts are evaluated across all clusters below.
+        clusters = [{"cluster": r["name"], "id": r["id"]} for r in cl_rows]
 
         # Stage 2: evaluate hosts across ALL in-scope clusters, then pick the best
         # host globally. Drilling only into the top-ranked cluster could hide a
@@ -191,11 +189,11 @@ vrops_placement_action = ActionDefinition(
     description=(
         "Recommend where to place a new VM of a given size in ONE call. Use for "
         "'where should I place / put a VM of N vCPU and M GB', 'best host/cluster for "
-        "a new VM', 'capacity to host a VM'. Picks the best cluster for the site then "
-        "the best host within it, ranked by free capacity remaining after placement. "
-        "Optionally scope to a physical site via location (e.g. 'lab', 'Madrid') — a "
-        "site name is NOT a resource name. If nothing fits, names the blocking resource "
-        "(cpu/memory) and the closest option."
+        "a new VM', 'capacity to host a VM'. Evaluates hosts across the clusters in "
+        "scope and picks the best fitting host (most free capacity after placement), "
+        "reporting its cluster. Optionally scope to a physical site via location (e.g. "
+        "'lab', 'Madrid') — a site name is NOT a resource name. If nothing fits, names "
+        "the blocking resource (cpu/memory) and the closest option."
     ),
     input_schema={
         "type": "object",
