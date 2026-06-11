@@ -7,6 +7,8 @@ import json
 from src.actions.builtin.vrops.analysis import (
     free_capacity_score,
     oversize_score,
+    reclaimable_vcpu,
+    reclaimable_mem_gb,
     CLUSTER_CAPACITY_KEYS,
     VM_RIGHTSIZING_KEYS,
 )
@@ -39,6 +41,39 @@ def test_oversize_score_treats_missing_as_zero():
 def test_stat_key_constants_are_nonempty_lists():
     assert isinstance(CLUSTER_CAPACITY_KEYS, list) and CLUSTER_CAPACITY_KEYS
     assert isinstance(VM_RIGHTSIZING_KEYS, list) and VM_RIGHTSIZING_KEYS
+
+
+def test_reclaimable_vcpu_converts_mhz_to_vcpus():
+    # 4 vCPU, current 8400 MHz, recommended 4200 MHz -> half reclaimable -> 2.0
+    assert reclaimable_vcpu(4, 8400.0, 4200.0) == 2.0
+
+
+def test_reclaimable_vcpu_zero_when_not_oversized():
+    assert reclaimable_vcpu(4, 8400.0, 8400.0) == 0.0
+    assert reclaimable_vcpu(4, 8400.0, 9000.0) == 0.0
+
+
+def test_reclaimable_vcpu_zero_on_missing_inputs():
+    assert reclaimable_vcpu(None, 8400.0, 4200.0) == 0.0
+    assert reclaimable_vcpu(4, None, 4200.0) == 0.0
+    assert reclaimable_vcpu(4, 8400.0, None) == 0.0
+
+
+def test_reclaimable_vcpu_zero_when_recommended_is_zero():
+    # A 0 MHz recommendation is no signal, not "reclaim all vCPUs".
+    assert reclaimable_vcpu(4, 8400.0, 0.0) == 0.0
+
+
+def test_reclaimable_mem_gb_difference_in_gb():
+    # 8 GiB provisioned (8388608 KB), 4 GiB recommended -> 4.0 GB reclaimable
+    assert reclaimable_mem_gb(8388608.0, 4194304.0) == 4.0
+
+
+def test_reclaimable_mem_gb_zero_when_not_oversized_or_missing():
+    assert reclaimable_mem_gb(4194304.0, 4194304.0) == 0.0
+    assert reclaimable_mem_gb(4194304.0, 8388608.0) == 0.0
+    assert reclaimable_mem_gb(None, 4194304.0) == 0.0
+    assert reclaimable_mem_gb(8388608.0, None) == 0.0
 
 
 from src.actions.builtin.vrops.sites import SiteMap
