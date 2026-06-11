@@ -144,13 +144,17 @@ async def _capacity_report(args: dict, resource_kind: str, label: str) -> Action
         leader = top[0]
         descriptor = "most" if reverse else "least"
         b = leader["bottleneck"]
+        # Only list dimensions that actually have a value (hosts may lack storage).
+        by_type = ", ".join(
+            f"{dim} {leader[dim]['capacity_remaining_pct']}%"
+            for dim in ("cpu", "memory", "storage")
+            if leader[dim]["capacity_remaining_pct"] is not None
+        )
         headline = (
             f"{leader['name']} has the {descriptor} free capacity of any {label}"
             + (f" in {location}" if location else "")
             + f" — most constrained on {b} ({leader['least_free_pct']}% remaining). "
-            + f"By type: cpu {leader['cpu']['capacity_remaining_pct']}%, "
-            + f"memory {leader['memory']['capacity_remaining_pct']}%, "
-            + f"storage {leader['storage']['capacity_remaining_pct']}% remaining."
+            + f"By type: {by_type} remaining."
         )
         return ActionResult(success=True, summary=headline,
                             raw={"object": label, "location": location, "sort": sort,
