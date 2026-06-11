@@ -188,3 +188,44 @@ def summarize_alerts(alerts: list[dict], top_n: int = 10,
         "top": top,
         "shown_in_top": len(top),
     }
+
+
+# --- Fleet capacity / rightsizing -------------------------------------------
+# Candidate vROps stat keys. Exact names vary by Aria/vROps version; confirm
+# against the live instance with get_stat_keys and adjust if a key returns no
+# data. (See spec "Open items".)
+CLUSTER_CAPACITY_KEYS = [
+    "cpu|capacityRemainingPercent",
+    "mem|capacityRemainingPercent",
+    "diskspace|capacityRemainingPercent",
+]
+
+VM_RIGHTSIZING_KEYS = [
+    "summary|oversized",   # oversized flag (>0 means oversized)
+    "cpu|reclaimable",     # reclaimable vCPUs
+    "mem|reclaimable",     # reclaimable memory (GB)
+]
+
+
+def free_capacity_score(remaining_pcts: list[float | None]) -> float | None:
+    """Bottleneck free-capacity score: the *minimum* remaining percentage across
+    the given dimensions (CPU/mem/disk). A cluster is constrained by its tightest
+    resource, so the smallest remaining-% is the most honest single number to
+    rank 'least free' by. None values (missing metric) are ignored; returns None
+    when no dimension has data.
+    """
+    present = [p for p in remaining_pcts if p is not None]
+    if not present:
+        return None
+    return round(min(present), 2)
+
+
+def oversize_score(reclaimable_vcpu: float | None,
+                   reclaimable_mem_gb: float | None) -> float:
+    """Rank magnitude for an oversized VM. vCPUs and memory are not directly
+    comparable, so combine them into one heuristic: each reclaimable vCPU is
+    weighted as ~2 GB of memory. Missing values count as 0.
+    """
+    vcpu = reclaimable_vcpu or 0.0
+    mem = reclaimable_mem_gb or 0.0
+    return round(vcpu * 2.0 + mem, 2)
