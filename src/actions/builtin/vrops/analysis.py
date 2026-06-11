@@ -292,3 +292,46 @@ def reclaimable_mem_gb(current_mem_kb: float | None,
     if diff_kb <= 0:
         return 0.0
     return round(diff_kb / _KB_PER_GB, 2)
+
+
+# --- VM placement ------------------------------------------------------------
+# Keys to evaluate whether a requested VM fits a cluster/host. Both kinds expose
+# these (verified live). Memory total: hosts publish mem|host_provisioned; clusters
+# publish mem|demand|usableCapacity (and, here, mem|host_provisioned too).
+PLACEMENT_CPU_CAPACITY_KEY = "cpu|capacity_provisioned"          # total CPU MHz
+PLACEMENT_CPU_CORECOUNT_KEY = "cpu|corecount_provisioned"        # cores / vCPUs
+PLACEMENT_CPU_FREE_KEY = "OnlineCapacityAnalytics|cpu|demand|capacityRemaining"  # free MHz
+PLACEMENT_CPU_USAGE_PCT_KEY = "cpu|capacity_usagepct_average"    # raw usage %
+PLACEMENT_MEM_FREE_KEY = "OnlineCapacityAnalytics|mem|demand|capacityRemaining"  # free KB
+PLACEMENT_MEM_USAGE_PCT_KEY = "mem|usage_average"               # raw usage %
+PLACEMENT_MEM_TOTAL_HOST_KEY = "mem|host_provisioned"           # total KB (hosts + clusters)
+PLACEMENT_MEM_TOTAL_CLUSTER_KEY = "mem|demand|usableCapacity"   # total KB (clusters fallback)
+
+PLACEMENT_KEYS = [
+    PLACEMENT_CPU_CAPACITY_KEY,
+    PLACEMENT_CPU_CORECOUNT_KEY,
+    PLACEMENT_CPU_FREE_KEY,
+    PLACEMENT_CPU_USAGE_PCT_KEY,
+    PLACEMENT_MEM_FREE_KEY,
+    PLACEMENT_MEM_USAGE_PCT_KEY,
+    PLACEMENT_MEM_TOTAL_HOST_KEY,
+    PLACEMENT_MEM_TOTAL_CLUSTER_KEY,
+]
+
+
+def mhz_per_vcpu(cpu_capacity_mhz: float | None, corecount: float | None) -> float | None:
+    """MHz per vCPU = total CPU MHz / core count. None if either is missing or
+    corecount is non-positive."""
+    if cpu_capacity_mhz is None or not corecount or corecount <= 0:
+        return None
+    return cpu_capacity_mhz / corecount
+
+
+def headroom_after_pct(free: float | None, required: float | None,
+                       total: float | None) -> float | None:
+    """Headroom remaining as a percent of total after subtracting `required` from
+    `free`. None if total is missing/non-positive or free/required is missing. May
+    be negative (the request would overcommit the resource)."""
+    if free is None or required is None or not total or total <= 0:
+        return None
+    return round((free - required) / total * 100.0, 1)
