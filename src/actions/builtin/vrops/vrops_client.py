@@ -982,6 +982,123 @@ class VropsClient:
             logging.error(f"Error getting latest stats for {resource_id}: {e}")
             return {}
 
+    def list_resources_by_kind(self, resource_kind: str, adapter_kind: str = "VMWARE",
+                               page_size: int = 1000, max_resources: int = 20000) -> List[Dict[str, Any]]:
+        """Enumerate every resource of a kind (no name filter), paging until done.
+
+        search_resources requires a name; this is the whole-kind enumeration the
+        fleet reports need. Capped at max_resources as a safety bound.
+        """
+        out: List[Dict[str, Any]] = []
+        page = 0
+        try:
+            while len(out) < max_resources:
+                params = {"resourceKind": resource_kind, "adapterKind": adapter_kind,
+                          "page": page, "pageSize": page_size}
+                resp = self._request("GET", "/resources", params=params)
+                if resp.status_code != 200:
+                    logging.error(f"list_resources_by_kind failed: {resp.status_code}")
+                    break
+                data = resp.json()
+                batch = data.get("resourceList", [])
+                for r in batch:
+                    rk = r.get("resourceKey", {})
+                    out.append({
+                        "identifier": r.get("identifier"),
+                        "name": rk.get("name"),
+                        "resourceKind": rk.get("resourceKindKey"),
+                        "adapterKind": rk.get("adapterKindKey"),
+                        "health": r.get("resourceHealth"),
+                        "healthValue": r.get("resourceHealthValue"),
+                    })
+                total = (data.get("pageInfo") or {}).get("totalCount")
+                if not batch or total is None or len(out) >= total:
+                    break
+                page += 1
+            return out
+        except Exception as e:
+            logging.error(f"Error listing resources of kind {resource_kind}: {e}")
+            return out
+
+    def get_child_resources(self, resource_id: str, resource_kind: Optional[str] = None,
+                            page_size: int = 1000) -> List[Dict[str, Any]]:
+        """Direct child resources of a resource (a single CHILD hop), optionally
+        filtered to one resource_kind.
+
+        vROps relationships are single-hop only (relationshipType is PARENT, CHILD,
+        or ALL — there is NO transitive DESCENDANT; it returns HTTP 400). Multi-level
+        descent (e.g. Datacenter -> VMFolder -> VirtualMachine) is composed in the
+        fleet layer by calling this repeatedly.
+        """
+        out: List[Dict[str, Any]] = []
+        page = 0
+        try:
+            while True:
+                params = {"relationshipType": "CHILD",
+                          "page": page, "pageSize": page_size}
+                resp = self._request("GET", f"/resources/{resource_id}/relationships",
+                                     params=params)
+                if resp.status_code != 200:
+                    logging.error(f"get_child_resources failed: {resp.status_code}")
+                    break
+                data = resp.json()
+                batch = data.get("resourceList", [])
+                for r in batch:
+                    rk = r.get("resourceKey", {})
+                    kind = rk.get("resourceKindKey")
+                    if resource_kind and kind != resource_kind:
+                        continue
+                    out.append({
+                        "identifier": r.get("identifier"),
+                        "name": rk.get("name"),
+                        "resourceKind": kind,
+                        "adapterKind": rk.get("adapterKindKey"),
+                        "health": r.get("resourceHealth"),
+                    })
+                total = (data.get("pageInfo") or {}).get("totalCount")
+                # The optional client-side resource_kind filter means len(out) may be
+                # < total, so page against total directly rather than len(out) >= total.
+                if not batch or total is None or (page + 1) * page_size >= total:
+                    break
+                page += 1
+            return out
+        except Exception as e:
+            logging.error(f"Error getting child resources of {resource_id}: {e}")
+            return out
+
+    def get_latest_stats_bulk(self, resource_ids: List[str], stat_keys: List[str],
+                              chunk_size: int = 100) -> Dict[str, Dict[str, Any]]:
+        """Latest value of each stat key for many resources, in chunked calls.
+
+        Returns {resource_id: {stat_key: value}}. One call per chunk keeps a
+        fleet report to a handful of HTTP requests instead of one-per-resource.
+        """
+        out: Dict[str, Dict[str, Any]] = {}
+        ids = [r for r in dict.fromkeys(resource_ids) if r]
+        for i in range(0, len(ids), chunk_size):
+            chunk = ids[i:i + chunk_size]
+            params: Dict[str, Any] = {"resourceId": chunk}
+            if stat_keys:
+                params["statKey"] = stat_keys
+            try:
+                resp = self._request("GET", "/resources/stats/latest", params=params)
+                if resp.status_code != 200:
+                    logging.error(f"get_latest_stats_bulk failed: {resp.status_code}")
+                    continue
+                for v in resp.json().get("values", []):
+                    rid = v.get("resourceId")
+                    stats: Dict[str, Any] = {}
+                    for stat in v.get("stat-list", {}).get("stat", []):
+                        key = stat.get("statKey", {}).get("key")
+                        data = stat.get("data") or []
+                        if key and data:
+                            stats[key] = data[-1]
+                    if rid:
+                        out[rid] = stats
+            except Exception as e:
+                logging.error(f"Error bulk-fetching stats: {e}")
+        return out
+
     def get_stats(self, resource_id: str, stat_keys: List[str],
                   hours_back: float = 6.0, rollup: str = "AVG",
                   interval: str = "MINUTES", interval_qty: int = 5) -> Dict[str, Any]:

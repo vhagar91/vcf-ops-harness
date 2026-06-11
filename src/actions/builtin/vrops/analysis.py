@@ -188,3 +188,107 @@ def summarize_alerts(alerts: list[dict], top_n: int = 10,
         "top": top,
         "shown_in_top": len(top),
     }
+
+
+# --- Fleet capacity / rightsizing -------------------------------------------
+# Stat keys verified against the live vROps instance (OnlineCapacityAnalytics
+# family). Key availability is version-dependent; re-check with get_stat_keys
+# when porting to another Aria/vROps version.
+
+# Cluster capacity is reported BY TYPE (cpu / memory / storage), not as one conflated
+# number. Per-type "capacity remaining %" = capacityRemaining / usableCapacity — the
+# vROps capacity-engine view (after HA/buffer). Raw utilization % is shown alongside it.
+# All keys verified on the live instance.
+CLUSTER_OVERALL_REMAINING_PCT_KEY = "OnlineCapacityAnalytics|capacityRemainingPercentage"
+# Per-dimension remaining (absolute):
+CLUSTER_CPU_REMAINING_KEY = "OnlineCapacityAnalytics|cpu|demand|capacityRemaining"      # MHz
+CLUSTER_MEM_REMAINING_KEY = "OnlineCapacityAnalytics|mem|demand|capacityRemaining"      # KB
+CLUSTER_DISK_REMAINING_KEY = "OnlineCapacityAnalytics|diskspace|demand|capacityRemaining"  # GB
+# Per-dimension usable capacity (absolute):
+CLUSTER_CPU_USABLE_KEY = "cpu|demand|usableCapacity"        # MHz
+CLUSTER_MEM_USABLE_KEY = "mem|demand|usableCapacity"        # KB
+CLUSTER_DISK_USABLE_KEY = "diskspace|demand|usableCapacity"  # GB
+# Raw utilization % (mem|capacity_usagepct_average returns no data here; use usage_average):
+CLUSTER_CPU_USAGE_PCT_KEY = "cpu|capacity_usagepct_average"
+CLUSTER_MEM_USAGE_PCT_KEY = "mem|usage_average"
+CLUSTER_CAPACITY_KEYS = [
+    CLUSTER_OVERALL_REMAINING_PCT_KEY,
+    CLUSTER_CPU_REMAINING_KEY, CLUSTER_MEM_REMAINING_KEY, CLUSTER_DISK_REMAINING_KEY,
+    CLUSTER_CPU_USABLE_KEY, CLUSTER_MEM_USABLE_KEY, CLUSTER_DISK_USABLE_KEY,
+    CLUSTER_CPU_USAGE_PCT_KEY, CLUSTER_MEM_USAGE_PCT_KEY,
+]
+
+# VM rightsizing — current vs vROps-recommended (verified keys):
+VM_CURRENT_VCPU_KEY = "config|hardware|num_Cpu"          # vCPU count
+VM_CURRENT_CPU_MHZ_KEY = "cpu|vm_capacity_provisioned"   # current CPU MHz
+VM_RECOMMENDED_CPU_MHZ_KEY = "OnlineCapacityAnalytics|cpu|recommendedSize"  # MHz
+VM_CURRENT_MEM_KB_KEY = "mem|guest_provisioned"          # KB
+VM_RECOMMENDED_MEM_KB_KEY = "OnlineCapacityAnalytics|mem|recommendedSize"   # KB
+VM_RIGHTSIZING_KEYS = [
+    VM_CURRENT_VCPU_KEY,
+    VM_CURRENT_CPU_MHZ_KEY,
+    VM_RECOMMENDED_CPU_MHZ_KEY,
+    VM_CURRENT_MEM_KB_KEY,
+    VM_RECOMMENDED_MEM_KB_KEY,
+]
+
+_KB_PER_GB = 1024 * 1024
+
+
+def free_capacity_score(remaining_pcts: list[float | None]) -> float | None:
+    """Bottleneck free-capacity score: the *minimum* remaining percentage across
+    the given dimensions (CPU/mem/disk). A cluster is constrained by its tightest
+    resource, so the smallest remaining-% is the most honest single number to
+    rank 'least free' by. None values (missing metric) are ignored; returns None
+    when no dimension has data.
+    """
+    present = [p for p in remaining_pcts if p is not None]
+    if not present:
+        return None
+    return round(min(present), 2)
+
+
+def pct_remaining(remaining: float | None, usable: float | None) -> float | None:
+    """Capacity-remaining percentage for one dimension = remaining / usable * 100.
+    None if either value is missing or usable is non-positive."""
+    if remaining is None or not usable or usable <= 0:
+        return None
+    return round(remaining / usable * 100.0, 1)
+
+
+def oversize_score(vcpu_reclaimable: float | None,
+                   mem_reclaimable_gb: float | None) -> float:
+    """Rank magnitude for an oversized VM. vCPUs and memory are not directly
+    comparable, so combine them into one heuristic: each reclaimable vCPU is
+    weighted as ~2 GB of memory. Missing values count as 0.
+    """
+    vcpu = vcpu_reclaimable or 0.0
+    mem = mem_reclaimable_gb or 0.0
+    return round(vcpu * 2.0 + mem, 2)
+
+
+def reclaimable_vcpu(num_cpu: float | None, current_cpu_mhz: float | None,
+                     recommended_cpu_mhz: float | None) -> float:
+    """Reclaimable vCPUs for an oversized VM. vROps gives a recommended CPU size in
+    MHz, not a vCPU count, so convert via the VM's own MHz-per-vCPU ratio:
+    num_cpu * (1 - recommended_mhz / current_mhz). Returns 0.0 if any input is
+    missing/zero or the VM is not oversized (recommended >= current).
+    """
+    if not num_cpu or not current_cpu_mhz or not recommended_cpu_mhz:
+        return 0.0
+    if recommended_cpu_mhz >= current_cpu_mhz:
+        return 0.0
+    return round(num_cpu * (1.0 - recommended_cpu_mhz / current_cpu_mhz), 2)
+
+
+def reclaimable_mem_gb(current_mem_kb: float | None,
+                       recommended_mem_kb: float | None) -> float:
+    """Reclaimable memory in GB: current provisioned minus vROps-recommended (both
+    in KB). Returns 0.0 if either is missing or the VM is not oversized.
+    """
+    if current_mem_kb is None or recommended_mem_kb is None:
+        return 0.0
+    diff_kb = current_mem_kb - recommended_mem_kb
+    if diff_kb <= 0:
+        return 0.0
+    return round(diff_kb / _KB_PER_GB, 2)

@@ -37,7 +37,16 @@ DEFAULT_SYSTEM_PROMPT = (
     "- When narrating a vrops_diagnose report, follow this template: a one-line "
     "verdict headline, then health, then only the notable (breaching or trending) "
     "metrics, then the recommendations. State only numbers and names present in "
-    "the report; never add values that are not in it."
+    "the report; never add values that are not in it.\n"
+    "- For FLEET / ranking questions across many resources, use the report tools and "
+    "do NOT enumerate resources one by one: 'which CLUSTER has most/least free "
+    "capacity' -> vrops_cluster_capacity_report; 'which ESXi HOST/hypervisor has "
+    "most/least free capacity' -> vrops_host_capacity_report; 'oversized VMs' / "
+    "'rightsizing' -> vrops_oversized_vms_report; other ad-hoc 'rank all X by metric "
+    "Y' -> vrops_fleet_query. A physical SITE name (e.g. 'lab', 'Madrid') is a "
+    "LOCATION: pass it as the report's location parameter — never search for it as a "
+    "resource name. If a report says the location is unknown, tell the user the known "
+    "sites it lists."
 )
 
 
@@ -73,6 +82,7 @@ class HarnessConfig:
     vrops_username: str = ""
     vrops_password: str = ""
     vrops_auth_source: str = "Local"
+    vrops_site_map_file: str | None = None
 
     system_prompt: str = field(default_factory=lambda: DEFAULT_SYSTEM_PROMPT)
     max_conversation_turns: int = 50
@@ -142,6 +152,7 @@ def load_config() -> HarnessConfig:
         vrops_username=os.environ.get("VROPS_USERNAME", ""),
         vrops_password=os.environ.get("VROPS_PASSWORD", ""),
         vrops_auth_source=os.environ.get("VROPS_AUTH_SOURCE", "Local"),
+        vrops_site_map_file=os.environ.get("VROPS_SITE_MAP_FILE") or None,
         system_prompt=os.environ.get("SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT),
         max_conversation_turns=int(os.environ.get("MAX_CONVERSATION_TURNS", "50")),
         max_output_tokens=int(os.environ.get("MAX_OUTPUT_TOKENS", "800")),
