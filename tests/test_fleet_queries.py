@@ -345,3 +345,10 @@ def test_fleet_query_rejects_sort_by_not_in_stat_keys(monkeypatch):
         {"resource_kind": "HostSystem", "stat_keys": ["a"], "sort_by": "b"}))
     assert res.success is False
     assert "sort_by" in res.summary
+
+
+def test_report_actions_imported_in_main():
+    import src.main as main_mod
+    assert hasattr(main_mod, "vrops_report_actions")
+    names = {a.name for a in main_mod.vrops_report_actions}
+    assert "vrops_cluster_capacity_report" in names
