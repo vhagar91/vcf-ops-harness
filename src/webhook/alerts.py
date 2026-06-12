@@ -81,3 +81,55 @@ def build_prompt(alert: AlertInfo, context: dict) -> str:
         lines.append(f"Alert detail: {json.dumps(detail)[:1500]}")
     lines.append(f"Raw payload: {json.dumps(alert.raw)[:1500]}")
     return "\n".join(lines)
+
+
+def enrich(client, alert: AlertInfo) -> dict:
+    """Light enrichment: resolve the resource name (when absent) and fetch the alert's
+    full detail. Tolerates a missing client (no creds) by returning what it can."""
+    context: dict = {}
+    if client is None:
+        return context
+    try:
+        if not alert.resource_name and alert.resource_id:
+            names = client.get_resource_names([alert.resource_id]) or {}
+            entry = names.get(alert.resource_id) or {}
+            context["resource_name"] = entry.get("name")
+            context["resource_kind"] = entry.get("kind")
+        if alert.alert_id:
+            context["alert_detail"] = client.get_alert(alert.alert_id)
+    except Exception as e:
+        error("Alert enrichment failed (continuing)", error=str(e))
+    return context
+
+
+def _alert_headline(alert: AlertInfo, resource_name: str | None = None) -> str:
+    obj = resource_name or alert.resource_name or alert.resource_id or "unknown object"
+    return (f"{alert.criticality or 'ALERT'}: {alert.name or '(unnamed alert)'} on {obj}")
+
+
+def process_alert(payload: dict, client, memory, registry, llm_config,
+                  publisher: Publisher, min_criticality: str = "") -> None:
+    """Parse -> filter -> enrich -> run the agentic pipeline -> publish. Never raises;
+    on failure publishes a minimal fallback so the alert is not silently lost."""
+    alert = parse_alert(payload)
+    if not passes_criticality(alert, min_criticality):
+        info("Alert below criticality floor; skipping", criticality=alert.criticality)
+        return
+    headline = _alert_headline(alert)
+    try:
+        context = enrich(client, alert)
+        prompt = build_prompt(alert, context)
+        headline = _alert_headline(alert, context.get("resource_name"))
+        event = PipelineEvent(channel="vrops-webhook", user_id="vrops",
+                              text=prompt, thread_ts=alert.alert_id or "alert")
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            reply = loop.run_until_complete(run_pipeline(event, memory, registry, llm_config))
+        finally:
+            loop.close()
+        publisher.publish(f"\U0001f6a8 {headline}", reply or "(no summary generated)")
+    except Exception as e:
+        error("Alert processing failed", error=str(e), type=type(e).__name__)
+        publisher.publish(f"\U0001f6a8 {headline}",
+                          "⚠️ Automated summary unavailable; review the alert in vROps.")

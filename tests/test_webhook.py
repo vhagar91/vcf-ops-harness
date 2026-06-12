@@ -107,3 +107,86 @@ def test_build_prompt_includes_key_facts():
     assert "CRITICAL" in prompt
     assert "vm-01" in prompt
     assert "remediation" in prompt.lower()
+
+
+class _FakeVrops:
+    def __init__(self):
+        self.calls = []
+
+    def get_resource_names(self, ids, chunk_size=100):
+        self.calls.append(("names", ids))
+        return {ids[0]: {"name": "vm-01", "kind": "VirtualMachine"}}
+
+    def get_alert(self, alert_id):
+        self.calls.append(("alert", alert_id))
+        return {"alertId": alert_id, "symptoms": ["cpu>90"]}
+
+
+class _RecordingPublisher:
+    def __init__(self):
+        self.published = []
+
+    def publish(self, title, body):
+        self.published.append((title, body))
+
+
+def test_enrich_resolves_name_and_alert_detail():
+    a = A.parse_alert({"alertId": "a1", "resourceId": "r1"})
+    ctx = A.enrich(_FakeVrops(), a)
+    assert ctx["resource_name"] == "vm-01"
+    assert ctx["resource_kind"] == "VirtualMachine"
+    assert ctx["alert_detail"]["symptoms"] == ["cpu>90"]
+
+
+def test_enrich_handles_none_client():
+    a = A.parse_alert({"alertId": "a1", "resourceId": "r1"})
+    assert A.enrich(None, a) == {}
+
+
+def test_process_alert_publishes_pipeline_reply(monkeypatch):
+    async def fake_pipeline(event, memory, registry, llm_config):
+        assert "remediation" in event.text.lower()
+        return "1) summary 2) vm-01 3) steps"
+    monkeypatch.setattr(A, "run_pipeline", fake_pipeline)
+    pub = _RecordingPublisher()
+    A.process_alert({"alertId": "a1", "alertName": "High CPU", "criticality": "CRITICAL",
+                     "resourceId": "r1"},
+                    _FakeVrops(), memory=None, registry=None, llm_config=None, publisher=pub)
+    assert len(pub.published) == 1
+    title, body = pub.published[0]
+    assert "High CPU" in title
+    assert "summary" in body
+
+
+def test_process_alert_publishes_fallback_on_pipeline_error(monkeypatch):
+    async def boom(event, memory, registry, llm_config):
+        raise RuntimeError("llm down")
+    monkeypatch.setattr(A, "run_pipeline", boom)
+    pub = _RecordingPublisher()
+    A.process_alert({"alertId": "a1", "alertName": "High CPU", "criticality": "CRITICAL"},
+                    _FakeVrops(), memory=None, registry=None, llm_config=None, publisher=pub)
+    assert len(pub.published) == 1
+    assert "unavailable" in pub.published[0][1].lower()
+
+
+def test_process_alert_headline_uses_enriched_name(monkeypatch):
+    # Payload has only resourceId; enrich resolves it to vm-01 -> title shows the name.
+    async def fake_pipeline(event, memory, registry, llm_config):
+        return "ok"
+    monkeypatch.setattr(A, "run_pipeline", fake_pipeline)
+    pub = _RecordingPublisher()
+    A.process_alert({"alertId": "a1", "alertName": "High CPU", "criticality": "CRITICAL",
+                     "resourceId": "r1"},
+                    _FakeVrops(), memory=None, registry=None, llm_config=None, publisher=pub)
+    assert "vm-01" in pub.published[0][0]   # title contains the resolved name
+
+
+def test_process_alert_skips_below_criticality(monkeypatch):
+    async def fake_pipeline(event, memory, registry, llm_config):
+        return "should not run"
+    monkeypatch.setattr(A, "run_pipeline", fake_pipeline)
+    pub = _RecordingPublisher()
+    A.process_alert({"alertId": "a1", "criticality": "WARNING"},
+                    _FakeVrops(), memory=None, registry=None, llm_config=None,
+                    publisher=pub, min_criticality="CRITICAL")
+    assert pub.published == []
