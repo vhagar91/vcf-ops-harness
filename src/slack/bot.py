@@ -5,7 +5,9 @@ Listens for messages and feeds them into the pipeline.
 
 from __future__ import annotations
 
+import asyncio
 import re
+import threading
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -17,6 +19,47 @@ from ..actions.registry import ActionRegistry
 from ..pipeline.orchestrator import run_pipeline, PipelineMiddleware
 from ..ai.llm import LlmConfig
 from ..utils.logger import info, error
+
+
+def _run_pipeline_in_thread(event, thread_ts, say, memory, registry, llm_config) -> None:
+    """Run the (potentially minutes-long) agentic pipeline OFF the Slack event-listener
+    thread, then post the reply.
+
+    Slack's Socket Mode requires the event envelope to be acked within ~3 seconds, but
+    slack_bolt's SocketModeHandler only acks AFTER the listener returns. Running the
+    pipeline inline therefore blocked the ack for minutes (qwen3:4b is slow), so Slack
+    retried the event and reset the websocket (ConnectionResetError, rotating session
+    ids). Dispatching to a daemon thread lets the listener return immediately so the
+    envelope is acked on time; the reply is posted asynchronously when ready.
+    """
+
+    def _worker() -> None:
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                reply = loop.run_until_complete(
+                    run_pipeline(event, memory, registry, llm_config)
+                )
+                if reply:
+                    say(text=reply, thread_ts=thread_ts)
+            finally:
+                loop.close()
+        except Exception as exc:
+            error("Pipeline error", error=str(exc), type=type(exc).__name__)
+            if "connection" in str(exc).lower():
+                msg = (
+                    "⚠️ Couldn't reach the LLM backend. Check that the model "
+                    "server (Ollama / OpenAI) is running and reachable, then retry."
+                )
+            else:
+                msg = f"⚠️ An error occurred: {exc}"
+            try:
+                say(text=msg, thread_ts=thread_ts)
+            except Exception:
+                pass  # reply is best-effort
+
+    threading.Thread(target=_worker, name="vrops-pipeline", daemon=True).start()
 
 
 def create_and_start(config: HarnessConfig ,registry: ActionRegistry) -> None:
@@ -80,33 +123,17 @@ def create_and_start(config: HarnessConfig ,registry: ActionRegistry) -> None:
         )
 
         # Quick ack so a multi-step (and now slower) call doesn't look like a hang.
+        # NB: this is a Web API post, NOT the Socket Mode envelope ack — the envelope
+        # is acked by the listener returning, which is why the pipeline must not run
+        # inline here. See _run_pipeline_in_thread.
         try:
             say(text="🔎 Working on it…", thread_ts=thread_ts)
         except Exception:
             pass  # ack is best-effort
 
-        try:
-            import asyncio
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                reply = loop.run_until_complete(
-                    run_pipeline(event, memory, registry, llm_config)
-                )
-                if reply:
-                    say(text=reply, thread_ts=thread_ts)
-            finally:
-                loop.close()
-        except Exception as exc:
-            error("Pipeline error", error=str(exc), type=type(exc).__name__)
-            if "connection" in str(exc).lower():
-                msg = (
-                    "⚠️ Couldn't reach the LLM backend. Check that the model "
-                    "server (Ollama / OpenAI) is running and reachable, then retry."
-                )
-            else:
-                msg = f"⚠️ An error occurred: {exc}"
-            say(text=msg, thread_ts=thread_ts)
+        # Run the agentic loop off the listener thread so the envelope is acked on
+        # time; the reply is posted asynchronously when it completes.
+        _run_pipeline_in_thread(event, thread_ts, say, memory, registry, llm_config)
 
     # ------------------------------------------------------------------
     # Handle direct messages in a channel (no @-mention)

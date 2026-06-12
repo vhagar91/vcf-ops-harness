@@ -41,42 +41,53 @@ def _evaluate(stats: dict, vcpu: int, memory_gb: float) -> dict:
     """
     required_mem_kb = memory_gb * _KB_PER_GB
 
+    # Fit + ranking use RAW headroom (total - usage%). The vROps capacity-engine
+    # number (capacityRemaining) bakes in HA/buffer reservations and is frequently 0
+    # across an entire cluster, which would make placement say "nothing fits" even
+    # when hosts have ample real free memory — so it's reported as a caveat only.
     cpu_total = _num(stats, PLACEMENT_CPU_CAPACITY_KEY)
     cores = _num(stats, PLACEMENT_CPU_CORECOUNT_KEY)
     ratio = mhz_per_vcpu(cpu_total, cores)
-    cpu_free = _num(stats, PLACEMENT_CPU_FREE_KEY)
     cpu_usage = _num(stats, PLACEMENT_CPU_USAGE_PCT_KEY)
+    cpu_engine_free = _num(stats, PLACEMENT_CPU_FREE_KEY)
     required_mhz = vcpu * ratio if ratio is not None else None
+    cpu_free = (cpu_total * (1 - cpu_usage / 100.0)) if (cpu_total is not None and cpu_usage is not None) else None
     cpu_fits = (cpu_free is not None and required_mhz is not None and cpu_free >= required_mhz)
     cpu_free_after = (cpu_free - required_mhz) if (cpu_free is not None and required_mhz is not None) else None
-    cpu_raw_free = (cpu_total * (1 - cpu_usage / 100.0)) if (cpu_total is not None and cpu_usage is not None) else None
     cpu_head = headroom_after_pct(cpu_free, required_mhz, cpu_total)
 
-    mem_free = _num(stats, PLACEMENT_MEM_FREE_KEY)
     mem_total = _num(stats, PLACEMENT_MEM_TOTAL_HOST_KEY)
     if mem_total is None:
         mem_total = _num(stats, PLACEMENT_MEM_TOTAL_CLUSTER_KEY)
     mem_usage = _num(stats, PLACEMENT_MEM_USAGE_PCT_KEY)
+    mem_engine_free = _num(stats, PLACEMENT_MEM_FREE_KEY)
+    mem_free = (mem_total * (1 - mem_usage / 100.0)) if (mem_total is not None and mem_usage is not None) else None
     mem_fits = (mem_free is not None and mem_free >= required_mem_kb)
     mem_free_after = (mem_free - required_mem_kb) if mem_free is not None else None
-    mem_raw_free = (mem_total * (1 - mem_usage / 100.0)) if (mem_total is not None and mem_usage is not None) else None
     mem_head = headroom_after_pct(mem_free, required_mem_kb, mem_total)
+
+    # True when vROps reserves more than raw usage shows (HA/buffer) — a caveat to surface.
+    ha_reserved = bool(
+        (mem_engine_free is not None and mem_free is not None and mem_engine_free < mem_free)
+        or (cpu_engine_free is not None and cpu_free is not None and cpu_engine_free < cpu_free)
+    )
 
     return {
         "fits": bool(cpu_fits and mem_fits),
         "headroom_after_pct": free_capacity_score([cpu_head, mem_head]),
+        "ha_reserved": ha_reserved,
         "cpu": {
             "free_mhz": round(cpu_free, 1) if cpu_free is not None else None,
             "required_mhz": round(required_mhz, 1) if required_mhz is not None else None,
             "free_after_mhz": round(cpu_free_after, 1) if cpu_free_after is not None else None,
-            "raw_free_mhz": round(cpu_raw_free, 1) if cpu_raw_free is not None else None,
+            "capacity_engine_free_mhz": round(cpu_engine_free, 1) if cpu_engine_free is not None else None,
             "fits": bool(cpu_fits),
         },
         "memory": {
             "free_gb": round(mem_free / _KB_PER_GB, 2) if mem_free is not None else None,
             "required_gb": memory_gb,
             "free_after_gb": round(mem_free_after / _KB_PER_GB, 2) if mem_free_after is not None else None,
-            "raw_free_gb": round(mem_raw_free / _KB_PER_GB, 2) if mem_raw_free is not None else None,
+            "capacity_engine_free_gb": round(mem_engine_free / _KB_PER_GB, 2) if mem_engine_free is not None else None,
             "fits": bool(mem_fits),
         },
     }
@@ -152,21 +163,24 @@ async def _vrops_placement_recommendation(args: dict) -> ActionResult:
         if rec_host is not None:
             hp = rec_host["headroom_after_pct"]
             hp_txt = f"{hp}" if hp is not None else "n/a"
+            caveat = ""
+            if rec_host.get("ha_reserved"):
+                eng = rec_host["memory"]["capacity_engine_free_gb"]
+                caveat = (f" Note: VCF Ops' capacity engine reserves memory after HA/buffer "
+                          f"(engine-free {eng} GB) — this uses raw free headroom.")
             headline = (f"Place the {vcpu} vCPU / {memory_gb:g} GB VM on "
                         f"{rec_host['host']} (cluster {rec_host['cluster']}){loc_txt}. "
                         f"After placement, bottleneck headroom ~{hp_txt}% "
                         f"(cpu free {rec_host['cpu']['free_after_mhz']} MHz, "
-                        f"mem free {rec_host['memory']['free_after_gb']} GB).")
+                        f"mem free {rec_host['memory']['free_after_gb']} GB).{caveat}")
             recommended = {"cluster": rec_host["cluster"], "host": rec_host["host"], "fits": True}
         elif top:
             closest = top[0]
             blockers = ", ".join(_blockers(closest)) or "capacity"
-            raw_mem = closest["memory"]["raw_free_gb"]
-            raw_mem_txt = f"{raw_mem}" if raw_mem is not None else "n/a"
             headline = (f"No host can fit the {vcpu} vCPU / {memory_gb:g} GB VM{loc_txt} "
                         f"— blocked by {blockers}. Closest: {closest['host']} "
                         f"(cluster {closest['cluster']}; cpu free {closest['cpu']['free_mhz']} MHz, "
-                        f"mem free {closest['memory']['free_gb']} GB, raw mem free {raw_mem_txt} GB).")
+                        f"mem free {closest['memory']['free_gb']} GB).")
             recommended = {"cluster": closest["cluster"], "host": None, "fits": False}
         else:
             headline = f"No hosts found to evaluate{loc_txt}."
@@ -175,8 +189,9 @@ async def _vrops_placement_recommendation(args: dict) -> ActionResult:
         return ActionResult(success=True, summary=headline,
                             raw={"request": req, "location": location,
                                  "recommended": recommended,
-                                 "note": ("fit uses vROps capacity-engine free capacity "
-                                          "(post-HA/buffer); raw_free_* is total minus usage."),
+                                 "note": ("free_* / fit use RAW headroom (total - usage); "
+                                          "capacity_engine_free_* is the vROps capacity-engine "
+                                          "view after HA/buffer, shown as a caveat."),
                                  "candidates": top})
     except UnknownLocation as e:
         return _unknown_location_result(e)

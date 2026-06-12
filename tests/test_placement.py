@@ -55,44 +55,55 @@ from src.actions.builtin.vrops.analysis import (
 _KB = 1024 * 1024
 
 
-def _stats(cpu_free, mem_free_gb, mem_total_gb=32.0, cpu_total=16800.0,
-           cores=8.0, cpu_usage=20.0, mem_usage=40.0):
+def _stats(cpu_usage=20.0, mem_usage=40.0, mem_total_gb=32.0, cpu_total=16800.0,
+           cores=8.0, engine_cpu_free_mhz=0.0, engine_mem_free_gb=0.0):
+    """Build a candidate stats dict. Fit is driven by RAW headroom (usage/total);
+    engine_* values are the capacity-engine caveat figures."""
     return {
         PLACEMENT_CPU_CAPACITY_KEY: cpu_total,
         PLACEMENT_CPU_CORECOUNT_KEY: cores,
-        PLACEMENT_CPU_FREE_KEY: cpu_free,
+        PLACEMENT_CPU_FREE_KEY: engine_cpu_free_mhz,
         PLACEMENT_CPU_USAGE_PCT_KEY: cpu_usage,
-        PLACEMENT_MEM_FREE_KEY: mem_free_gb * _KB,
+        PLACEMENT_MEM_FREE_KEY: engine_mem_free_gb * _KB,
         PLACEMENT_MEM_USAGE_PCT_KEY: mem_usage,
         PLACEMENT_MEM_TOTAL_HOST_KEY: mem_total_gb * _KB,
     }
 
 
-def test_evaluate_fits_when_cpu_and_mem_have_room():
-    # 4 vCPU -> 4*2100 = 8400 MHz; cpu free 10292 ok; mem free 20GB >= 12
-    ev = P._evaluate(_stats(10292.0, 20.0), 4, 12.0)
+def test_evaluate_fits_on_raw_headroom():
+    # mem 32GB @ 40% used -> 19.2GB raw free >= 12; cpu 16800*0.8 = 13440 >= 8400
+    ev = P._evaluate(_stats(cpu_usage=20.0, mem_usage=40.0, mem_total_gb=32.0), 4, 12.0)
     assert ev["fits"] is True
     assert ev["cpu"]["fits"] is True
     assert ev["cpu"]["required_mhz"] == 8400.0
-    assert ev["cpu"]["free_after_mhz"] == 1892.0
+    assert ev["cpu"]["free_mhz"] == 13440.0
     assert ev["memory"]["fits"] is True
-    assert ev["memory"]["free_after_gb"] == 8.0
-    assert ev["headroom_after_pct"] is not None
+    assert ev["memory"]["free_gb"] == 19.2
+    assert ev["memory"]["free_after_gb"] == 7.2
 
 
-def test_evaluate_blocked_by_memory():
-    ev = P._evaluate(_stats(10292.0, 2.0), 4, 12.0)
+def test_evaluate_blocked_when_raw_memory_insufficient():
+    # 32GB @ 95% used -> 1.6GB raw free < 12
+    ev = P._evaluate(_stats(cpu_usage=20.0, mem_usage=95.0, mem_total_gb=32.0), 4, 12.0)
     assert ev["fits"] is False
-    assert ev["cpu"]["fits"] is True
     assert ev["memory"]["fits"] is False
-    assert ev["memory"]["free_after_gb"] == -10.0
-    assert ev["memory"]["raw_free_gb"] is not None
+    assert ev["cpu"]["fits"] is True
 
 
 def test_evaluate_blocked_by_cpu():
-    ev = P._evaluate(_stats(10292.0, 20.0), 16, 8.0)
+    # 16 vCPU -> 33600 MHz; raw cpu free 16800*0.8 = 13440 < 33600
+    ev = P._evaluate(_stats(cpu_usage=20.0, mem_usage=10.0, mem_total_gb=64.0), 16, 8.0)
     assert ev["fits"] is False
     assert ev["cpu"]["fits"] is False
+
+
+def test_evaluate_flags_ha_reserved_caveat():
+    # capacity engine reports 0 free but raw free is ample -> ha_reserved caveat
+    ev = P._evaluate(_stats(mem_usage=40.0, mem_total_gb=32.0, engine_mem_free_gb=0.0), 2, 1.0)
+    assert ev["fits"] is True
+    assert ev["ha_reserved"] is True
+    assert ev["memory"]["capacity_engine_free_gb"] == 0.0
+    assert ev["memory"]["free_gb"] == 19.2
 
 
 class FakeClient:
@@ -134,9 +145,9 @@ def test_placement_recommends_fitting_host(monkeypatch):
         by_kind={"ClusterComputeResource": [_res("cl1", "cluster-01a", "ClusterComputeResource")]},
         children={"cl1": [_res("h1", "esx-01a", "HostSystem"), _res("h2", "esx-02a", "HostSystem")]},
         stats={
-            "cl1": _stats(20000.0, 40.0, mem_total_gb=64.0, cpu_total=33600.0, cores=16.0),
-            "h1": _stats(4000.0, 4.0),    # tight
-            "h2": _stats(10292.0, 24.0),  # roomy: best
+            "cl1": _stats(mem_usage=50.0, mem_total_gb=64.0, cpu_total=33600.0, cores=16.0),
+            "h1": _stats(mem_usage=90.0, mem_total_gb=32.0),  # raw 3.2GB free -> can't fit 12
+            "h2": _stats(mem_usage=40.0, mem_total_gb=32.0),  # raw 19.2GB free -> fits
         },
     )
     _patch(monkeypatch, client)
@@ -149,8 +160,7 @@ def test_placement_recommends_fitting_host(monkeypatch):
 
 
 def test_placement_crosses_clusters_to_find_fit(monkeypatch):
-    # cl-A ranks first on aggregate headroom but its only host is too small for 12GB;
-    # cl-B ranks lower but its host fits. The recommendation must cross to cl-B.
+    # cl-A's only host is too small for 12GB; cl-B's host fits — must cross to cl-B.
     client = FakeClient(
         by_kind={"ClusterComputeResource": [
             _res("clA", "cl-A", "ClusterComputeResource"),
@@ -159,10 +169,10 @@ def test_placement_crosses_clusters_to_find_fit(monkeypatch):
         children={"clA": [_res("ha", "esx-a", "HostSystem")],
                   "clB": [_res("hb", "esx-b", "HostSystem")]},
         stats={
-            "clA": _stats(30000.0, 40.0, mem_total_gb=128.0, cpu_total=33600.0, cores=16.0),
-            "ha":  _stats(10000.0, 4.0),    # only 4 GB free -> can't fit 12
-            "clB": _stats(15000.0, 20.0, mem_total_gb=64.0, cpu_total=33600.0, cores=16.0),
-            "hb":  _stats(10292.0, 24.0),   # fits
+            "clA": _stats(mem_usage=40.0, mem_total_gb=128.0, cpu_total=33600.0, cores=16.0),
+            "ha":  _stats(mem_usage=92.0, mem_total_gb=32.0),  # raw ~2.6GB -> can't fit 12
+            "clB": _stats(mem_usage=40.0, mem_total_gb=64.0, cpu_total=33600.0, cores=16.0),
+            "hb":  _stats(mem_usage=40.0, mem_total_gb=32.0),  # raw 19.2GB -> fits
         },
     )
     _patch(monkeypatch, client)
@@ -178,8 +188,8 @@ def test_placement_reports_when_nothing_fits(monkeypatch):
         by_kind={"ClusterComputeResource": [_res("cl1", "cluster-01a", "ClusterComputeResource")]},
         children={"cl1": [_res("h1", "esx-01a", "HostSystem")]},
         stats={
-            "cl1": _stats(20000.0, 2.0, mem_total_gb=64.0, cpu_total=33600.0, cores=16.0),
-            "h1": _stats(10292.0, 2.0),  # only 2GB free, request 12 -> memory blocks
+            "cl1": _stats(mem_usage=80.0, mem_total_gb=64.0, cpu_total=33600.0, cores=16.0),
+            "h1": _stats(mem_usage=97.0, mem_total_gb=32.0),  # raw ~0.96GB -> can't fit 12
         },
     )
     _patch(monkeypatch, client)
@@ -188,6 +198,27 @@ def test_placement_reports_when_nothing_fits(monkeypatch):
     assert res.raw["recommended"]["host"] is None
     assert res.raw["recommended"]["fits"] is False
     assert "memory" in res.summary.lower()
+
+
+def test_placement_picks_more_raw_free_when_engine_zero(monkeypatch):
+    # Regression: vROps capacity engine reports 0 GB free on every host (HA/buffer).
+    # Placement must use RAW free and pick the host with more of it (esx-02a, 4.5GB),
+    # not the first-listed one (esx-01a, 1.6GB).
+    client = FakeClient(
+        by_kind={"ClusterComputeResource": [_res("cl1", "cluster-01a", "ClusterComputeResource")]},
+        children={"cl1": [_res("h1", "esx-01a", "HostSystem"), _res("h2", "esx-02a", "HostSystem")]},
+        stats={
+            "cl1": _stats(mem_usage=80.0, mem_total_gb=64.0),
+            "h1": _stats(mem_usage=90.0, mem_total_gb=16.0, engine_mem_free_gb=0.0),  # raw ~1.6GB
+            "h2": _stats(mem_usage=72.0, mem_total_gb=16.0, engine_mem_free_gb=0.0),  # raw ~4.5GB
+        },
+    )
+    _patch(monkeypatch, client)
+    res = asyncio.run(P._vrops_placement_recommendation({"vcpu": 2, "memory_gb": 1}))
+    assert res.success
+    assert res.raw["recommended"]["host"] == "esx-02a"
+    assert res.raw["recommended"]["fits"] is True
+    assert res.raw["candidates"][0]["ha_reserved"] is True
 
 
 def test_placement_requires_positive_size(monkeypatch):
