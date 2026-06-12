@@ -40,14 +40,29 @@ harness/
 │   │   ├── settings.py   # load_config() from environment
 │   │   └── types.py      # Domain types (Message, ActionDefinition, etc.)
 │   ├── slack/
-│   │   └── bot.py        # Slack bot (listener, message handler, /reset)
+│   │   └── bot.py        # Slack bot (listener, off-thread dispatch, /reset, webhook start)
 │   ├── ai/
-│   │   └── llm.py        # LLM integration (OpenAI chat completions + tool calls)
+│   │   ├── llm.py        # OpenAI/Ollama path (chat completions + tool calls)
+│   │   └── anthropic_llm.py  # Native Anthropic/Claude path (same bounded loop)
 │   ├── actions/
 │   │   ├── registry.py   # Pluggable action registry
 │   │   └── builtin/      # Built-in actions
 │   │       ├── echo.py
-│   │       └── get_time.py
+│   │       ├── get_time.py
+│   │       └── vrops/    # vROps client + tools
+│   │           ├── vrops_client.py  # Authenticated REST client
+│   │           ├── actions.py       # Read/admin action definitions
+│   │           ├── analysis.py      # Pure scoring/trend/capacity/rightsizing helpers
+│   │           ├── diagnose.py      # vrops_diagnose composite tool
+│   │           ├── fleet.py         # Scope (site CHILD-walk) → bulk stats pipeline
+│   │           ├── sites.py         # SiteMap: site → datacenter names
+│   │           ├── reports.py       # Cluster/host capacity, oversized-VM, fleet_query tools
+│   │           └── placement.py     # vrops_placement_recommendation
+│   ├── webhook/          # Proactive alert notification (vROps → LLM → Slack)
+│   │   ├── handler.py    # Pure request validation/parse
+│   │   ├── server.py     # Embedded ThreadingHTTPServer (ack-fast + dispatch)
+│   │   ├── alerts.py     # parse/enrich/prompt/process_alert
+│   │   └── publisher.py  # Publisher protocol + SlackPublisher
 │   ├── memory/
 │   │   └── memory.py     # Per-thread conversation memory
 │   ├── pipeline/
@@ -56,8 +71,9 @@ harness/
 │   │   ├── logger.py     # Structured logging
 │   │   └── retry.py      # Exponential backoff retry
 │   └── main.py           # Entry point
-├── tests/
-│   └── test_imports.py   # Import smoke test
+├── tests/                # pytest suite (robustness, alerts, fleet, placement, webhook, …)
+├── docs/superpowers/     # Design specs + implementation plans
+├── vrops-site-map.example.json  # Example site → datacenter map
 ├── .env.example          # Environment variable template
 ├── pyproject.toml
 └── README.md
@@ -125,6 +141,13 @@ registry.register(my_action)
 | `VROPS_USERNAME`         | ❌       | —         | vROps username                       |
 | `VROPS_PASSWORD`         | ❌       | —         | vROps password                       |
 | `VROPS_AUTH_SOURCE`      | ❌       | `Local`   | vROps auth source                    |
+| `VROPS_SITE_MAP_FILE`    | ❌       | —         | JSON file mapping site → datacenter names, for location-scoped fleet queries (see `vrops-site-map.example.json`) |
+| `WEBHOOK_ENABLED`        | ❌       | `false`   | Enable the inbound vROps alert webhook listener (proactive notifications) |
+| `WEBHOOK_PORT`           | ❌       | `8088`    | Port for the webhook listener        |
+| `WEBHOOK_TOKEN`          | ❌       | —         | Shared secret on inbound webhooks (header `X-Webhook-Token` or `?token=`); required when enabled |
+| `WEBHOOK_PATH`           | ❌       | `/vrops/alert` | Accepted webhook POST path      |
+| `VROPS_ALERT_CHANNEL`    | ❌       | —         | Slack channel to publish alert summaries to; required when webhook enabled |
+| `WEBHOOK_MIN_CRITICALITY`| ❌       | —         | Optional floor: `INFORMATION`/`WARNING`/`IMMEDIATE`/`CRITICAL` (empty = all) |
 | `LOG_LEVEL`              | ❌       | `INFO`    | `DEBUG`, `INFO`, `WARN`, `ERROR`     |
 
 ## LLM providers
@@ -151,6 +174,12 @@ output is size-capped before re-entering the context, replies are capped at
 `MAX_OUTPUT_TOKENS`, and `<think>` blocks from thinking models are stripped. The
 default system prompt instructs the model to answer **only** from tool data.
 
+The pipeline runs **off the Slack event-listener thread** (a daemon thread per
+message): Socket Mode must ack the event envelope within ~3 s, but a slow model can
+take far longer, so the handler returns immediately (after the "🔎 Working on it…"
+ack) and posts the reply when ready. Running it inline previously caused Slack to
+drop and churn connections (`ConnectionResetError`).
+
 ## vROps tools
 
 Read (health / alerts / performance):
@@ -170,6 +199,41 @@ Plus the original write/admin tools: `vrops_find_resource`,
 `vrops_push_event`, `vrops_get_monitored_vcenters`,
 `vrops_get_monitored_nsxt_managers`, `vrops_add_child_relationship`,
 `vrops_get_version`.
+
+### Operations assistant (composite + fleet tools)
+
+These do the heavy lifting in Python and return one compact, already-ranked report,
+so the model makes a single tool call and only narrates the result:
+
+| Tool | Purpose |
+|------|---------|
+| `vrops_diagnose` | One-call triage of a resource: health + active alerts + metric trends + ranked recommendations |
+| `vrops_cluster_capacity_report` | Rank clusters by free capacity **by type (cpu/memory/storage)**, naming the bottleneck; optional `location` |
+| `vrops_host_capacity_report` | Same, for ESXi hosts (`HostSystem`) |
+| `vrops_oversized_vms_report` | Oversized VMs ranked by reclaimable vCPU/memory (vROps native rightsizing) |
+| `vrops_fleet_query` | Generic "rank all X by metric Y" across a kind, optionally scoped to a site |
+| `vrops_placement_recommendation` | Best host to place a new VM of a given `vcpu`/`memory_gb`, ranked by free headroom after placement; names the blocker when nothing fits |
+
+**Site scoping.** Fleet/placement tools accept a `location` (e.g. `Madrid`, `lab`). A
+`SiteMap` loaded from `VROPS_SITE_MAP_FILE` maps each site to its vROps **Datacenter**
+names; resources are scoped by a recursive single-hop `CHILD` walk (vROps relationships
+have no transitive `DESCENDANT`). Capacity is reported both as the vROps capacity-engine
+view (post-HA/buffer) and raw headroom; placement fits/ranks on raw headroom and surfaces
+an HA-reservation caveat. See `vrops-site-map.example.json`.
+
+## Proactive alert notification (vROps webhook → LLM → Slack)
+
+When enabled (`WEBHOOK_ENABLED=true`), the bot runs an embedded HTTP listener in the same
+process, alongside the Slack connection. Point a vROps **Webhook Outbound** notification at
+`http://<bot-host>:<WEBHOOK_PORT><WEBHOOK_PATH>` with header `X-Webhook-Token: <WEBHOOK_TOKEN>`.
+
+On each alert the bot: validates the token, **acks `202` immediately**, then (in a
+background thread) resolves the resource name + alert detail, runs the alert through the
+agentic pipeline for an executive summary + 3 remediation steps, and publishes the result
+to `VROPS_ALERT_CHANNEL`. If the LLM fails, it still posts a fallback with the raw alert so
+nothing is silently dropped. The listener is **off by default** and refuses to start without
+both a token (else it would be an open endpoint) and an alert channel. Output goes through a
+small `Publisher` seam (`src/webhook/publisher.py`) so Teams/ticketing can be added later.
 
 ## Running
 
