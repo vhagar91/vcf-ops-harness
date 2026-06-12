@@ -89,6 +89,14 @@ class HarnessConfig:
     vrops_auth_source: str = "Local"
     vrops_site_map_file: str | None = None
 
+    # Proactive alert webhook (off unless WEBHOOK_ENABLED=true)
+    webhook_enabled: bool = False
+    webhook_port: int = 8088
+    webhook_token: str = ""
+    webhook_path: str = "/vrops/alert"
+    vrops_alert_channel: str = ""
+    webhook_min_criticality: str = ""
+
     system_prompt: str = field(default_factory=lambda: DEFAULT_SYSTEM_PROMPT)
     max_conversation_turns: int = 50
 
@@ -158,6 +166,12 @@ def load_config() -> HarnessConfig:
         vrops_password=os.environ.get("VROPS_PASSWORD", ""),
         vrops_auth_source=os.environ.get("VROPS_AUTH_SOURCE", "Local"),
         vrops_site_map_file=os.environ.get("VROPS_SITE_MAP_FILE") or None,
+        webhook_enabled=os.environ.get("WEBHOOK_ENABLED", "false").lower() == "true",
+        webhook_port=int(os.environ.get("WEBHOOK_PORT", "8088")),
+        webhook_token=os.environ.get("WEBHOOK_TOKEN", ""),
+        webhook_path=os.environ.get("WEBHOOK_PATH", "/vrops/alert"),
+        vrops_alert_channel=os.environ.get("VROPS_ALERT_CHANNEL", ""),
+        webhook_min_criticality=os.environ.get("WEBHOOK_MIN_CRITICALITY", ""),
         system_prompt=os.environ.get("SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT),
         max_conversation_turns=int(os.environ.get("MAX_CONVERSATION_TURNS", "50")),
         max_output_tokens=int(os.environ.get("MAX_OUTPUT_TOKENS", "800")),

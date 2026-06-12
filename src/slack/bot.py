@@ -19,6 +19,10 @@ from ..actions.registry import ActionRegistry
 from ..pipeline.orchestrator import run_pipeline, PipelineMiddleware
 from ..ai.llm import LlmConfig
 from ..utils.logger import info, error
+from ..webhook.server import start_webhook_server
+from ..webhook.publisher import SlackPublisher
+from ..webhook.alerts import process_alert
+from ..actions.builtin.vrops.actions import _build_client
 
 
 def _run_pipeline_in_thread(event, thread_ts, say, memory, registry, llm_config) -> None:
@@ -60,6 +64,36 @@ def _run_pipeline_in_thread(event, thread_ts, say, memory, registry, llm_config)
                 pass  # reply is best-effort
 
     threading.Thread(target=_worker, name="vrops-pipeline", daemon=True).start()
+
+
+def _maybe_start_webhook(app, config, memory, registry, llm_config) -> None:
+    """Start the proactive vROps alert webhook listener, if configured. Fail-safe:
+    never starts without a token (would be an open endpoint) or an alert channel
+    (nowhere to publish)."""
+    if not config.webhook_enabled:
+        return
+    if not config.webhook_token:
+        error("WEBHOOK_ENABLED but WEBHOOK_TOKEN is empty; not starting webhook listener")
+        return
+    if not config.vrops_alert_channel:
+        error("WEBHOOK_ENABLED but VROPS_ALERT_CHANNEL is empty; not starting webhook listener")
+        return
+
+    # app.client is a WebClient (bot-token Web API) independent of the Socket Mode /
+    # HTTP server loop, so publishing works even before/while Slack is connecting —
+    # which is why starting this listener before the blocking Slack start is safe.
+    publisher = SlackPublisher(app.client, config.vrops_alert_channel)
+
+    def _dispatch(payload):
+        try:
+            client = _build_client({})
+        except Exception:
+            client = None  # no vROps creds -> summarize from the raw payload only
+        process_alert(payload, client, memory, registry, llm_config, publisher,
+                      config.webhook_min_criticality)
+
+    start_webhook_server(config.webhook_port, config.webhook_token,
+                         config.webhook_path, _dispatch)
 
 
 def create_and_start(config: HarnessConfig ,registry: ActionRegistry) -> None:
@@ -183,6 +217,9 @@ def create_and_start(config: HarnessConfig ,registry: ActionRegistry) -> None:
     # ------------------------------------------------------------------
     # Start
     # ------------------------------------------------------------------
+    # Optional: proactive vROps alert webhook (embedded listener).
+    _maybe_start_webhook(app, config, memory, registry, llm_config)
+
     is_socket_mode = bool(config.slack_app_token)
     info(
         f"Slack bot configured (socketMode={is_socket_mode})",

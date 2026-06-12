@@ -9,7 +9,14 @@ from ..config.types import Message
 
 
 class ConversationMemory:
-    """Thread-safe (asyncio) conversation history store."""
+    """In-memory conversation history store, keyed by channel/thread.
+
+    Not guarded by a lock: the Slack dispatch threads and the webhook alert thread
+    are separate OS threads, so concurrent multi-step mutation of the SAME key could
+    interleave. Callers avoid this by using disjoint keys (each Slack thread, and
+    ``vrops-webhook``/alertId for alerts), and CPython's GIL makes individual dict
+    ops atomic. Add a lock here if callers ever share a key across threads.
+    """
 
     def __init__(self, max_turns: int = 50) -> None:
         self._store: dict[str, list[Message]] = {}
