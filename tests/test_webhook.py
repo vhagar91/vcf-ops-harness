@@ -67,3 +67,43 @@ def test_slack_publisher_swallows_errors():
     c = _FakeSlackClient(fail=True)
     # Must not raise — publishing is best-effort.
     SlackPublisher(c, "#ops").publish("H", "B")
+
+
+from src.webhook import alerts as A
+
+
+def test_parse_alert_reads_common_keys():
+    info = A.parse_alert({"alertId": "a1", "alertName": "High CPU",
+                          "criticality": "critical", "resourceId": "r1",
+                          "status": "ACTIVE"})
+    assert info.alert_id == "a1"
+    assert info.name == "High CPU"
+    assert info.criticality == "CRITICAL"
+    assert info.resource_id == "r1"
+    assert info.raw["alertId"] == "a1"
+
+
+def test_parse_alert_tolerates_alternate_keys_and_missing():
+    info = A.parse_alert({"id": "x", "alertDefinitionName": "Mem", "alertLevel": "warning"})
+    assert info.alert_id == "x"
+    assert info.name == "Mem"
+    assert info.criticality == "WARNING"
+    assert info.resource_id is None
+
+
+def test_passes_criticality_floor():
+    crit = A.parse_alert({"criticality": "CRITICAL"})
+    warn = A.parse_alert({"criticality": "WARNING"})
+    assert A.passes_criticality(crit, "CRITICAL") is True
+    assert A.passes_criticality(warn, "CRITICAL") is False
+    assert A.passes_criticality(warn, "") is True
+    assert A.passes_criticality(A.parse_alert({}), "CRITICAL") is True
+
+
+def test_build_prompt_includes_key_facts():
+    info = A.parse_alert({"alertName": "High CPU", "criticality": "CRITICAL", "resourceId": "r1"})
+    prompt = A.build_prompt(info, {"resource_name": "vm-01", "resource_kind": "VirtualMachine"})
+    assert "High CPU" in prompt
+    assert "CRITICAL" in prompt
+    assert "vm-01" in prompt
+    assert "remediation" in prompt.lower()
