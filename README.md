@@ -180,27 +180,31 @@ take far longer, so the handler returns immediately (after the "🔎 Working on 
 ack) and posts the reply when ready. Running it inline previously caused Slack to
 drop and churn connections (`ConnectionResetError`).
 
-## vROps tools
+## Tools
 
-Read (health / alerts / performance):
+24 LLM-callable tools are registered in `src/main.py`. The model selects and chains
+them within the bounded agentic loop.
+
+### Built-in
 
 | Tool | Purpose |
 |------|---------|
-| `vrops_search_resources`     | Find resources by name; returns all matches + IDs + health |
-| `vrops_get_resource_health`  | Health (GREEN/YELLOW/ORANGE/RED) + status states |
-| `vrops_get_alerts`           | Active alerts, filterable by resource and criticality |
-| `vrops_get_alert`            | Full detail for one alert |
+| `echo`     | Echo the input back (connectivity test) |
+| `get_time` | Current server date/time |
+
+### vROps — read (health / alerts / performance)
+
+| Tool | Purpose |
+|------|---------|
+| `vrops_search_resources`     | Find resources by (partial) name; returns all matches + IDs + health |
+| `vrops_get_resource_health`  | Health (GREEN/YELLOW/ORANGE/RED) + status states for a resource ID |
+| `vrops_get_alerts`           | Compact summary of active alerts, filterable by resource and criticality |
+| `vrops_get_alert`            | Full detail for one alert by ID |
 | `vrops_get_stat_keys`        | Discover available metric keys for a resource |
 | `vrops_get_latest_stats`     | Most recent metric values ("current CPU usage") |
 | `vrops_get_stats`            | Time-series summary (count/latest/min/max/avg) over a window |
 
-Plus the original write/admin tools: `vrops_find_resource`,
-`vrops_get_resource_properties`, `vrops_create_resource`, `vrops_push_properties`,
-`vrops_push_event`, `vrops_get_monitored_vcenters`,
-`vrops_get_monitored_nsxt_managers`, `vrops_add_child_relationship`,
-`vrops_get_version`.
-
-### Operations assistant (composite + fleet tools)
+### vROps — operations assistant (composite + fleet)
 
 These do the heavy lifting in Python and return one compact, already-ranked report,
 so the model makes a single tool call and only narrates the result:
@@ -220,6 +224,20 @@ names; resources are scoped by a recursive single-hop `CHILD` walk (vROps relati
 have no transitive `DESCENDANT`). Capacity is reported both as the vROps capacity-engine
 view (post-HA/buffer) and raw headroom; placement fits/ranks on raw headroom and surfaces
 an HA-reservation caveat. See `vrops-site-map.example.json`.
+
+### vROps — write / admin / inventory
+
+| Tool | Purpose |
+|------|---------|
+| `vrops_get_version`               | vROps Manager version |
+| `vrops_find_resource`             | Resolve a single resource name+kind to its ID |
+| `vrops_get_resource_properties`   | Properties for a resource by ID |
+| `vrops_create_resource`           | Create a resource in vROps |
+| `vrops_push_properties`           | Push properties/stats to a resource |
+| `vrops_push_event`                | Push an event/alert to a resource |
+| `vrops_get_monitored_vcenters`    | List monitored vCenter Servers |
+| `vrops_get_monitored_nsxt_managers` | List monitored NSX-T managers |
+| `vrops_add_child_relationship`    | Add a parent→child relationship between two resources |
 
 ## Proactive alert notification (vROps webhook → LLM → Slack)
 
