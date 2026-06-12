@@ -208,3 +208,45 @@ def test_config_loads_webhook_fields(monkeypatch):
     assert c.webhook_path == "/vrops/alert"
     assert c.vrops_alert_channel == "#ops"
     assert c.webhook_min_criticality == "CRITICAL"
+
+
+import types
+
+from src.slack import bot as botmod
+
+
+def _cfg(**over):
+    base = dict(webhook_enabled=True, webhook_token="tok", vrops_alert_channel="#ops",
+                webhook_port=8088, webhook_path="/vrops/alert", webhook_min_criticality="")
+    base.update(over)
+    return types.SimpleNamespace(**base)
+
+
+def _fake_app():
+    return types.SimpleNamespace(client=object())
+
+
+def test_maybe_start_webhook_starts_when_configured(monkeypatch):
+    calls = []
+    monkeypatch.setattr(botmod, "start_webhook_server",
+                        lambda port, token, path, dispatch: calls.append((port, token, path)))
+    botmod._maybe_start_webhook(_fake_app(), _cfg(), memory=None, registry=None, llm_config=None)
+    assert calls == [(8088, "tok", "/vrops/alert")]
+
+
+def test_maybe_start_webhook_skips_when_disabled(monkeypatch):
+    calls = []
+    monkeypatch.setattr(botmod, "start_webhook_server", lambda *a, **k: calls.append(a))
+    botmod._maybe_start_webhook(_fake_app(), _cfg(webhook_enabled=False),
+                                memory=None, registry=None, llm_config=None)
+    assert calls == []
+
+
+def test_maybe_start_webhook_refuses_without_token_or_channel(monkeypatch):
+    calls = []
+    monkeypatch.setattr(botmod, "start_webhook_server", lambda *a, **k: calls.append(a))
+    botmod._maybe_start_webhook(_fake_app(), _cfg(webhook_token=""),
+                                memory=None, registry=None, llm_config=None)
+    botmod._maybe_start_webhook(_fake_app(), _cfg(vrops_alert_channel=""),
+                                memory=None, registry=None, llm_config=None)
+    assert calls == []
