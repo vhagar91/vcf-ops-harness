@@ -166,7 +166,7 @@ async def _vrops_placement_recommendation(args: dict) -> ActionResult:
             caveat = ""
             if rec_host.get("ha_reserved"):
                 eng = rec_host["memory"]["capacity_engine_free_gb"]
-                caveat = (f" Note: vROps' capacity engine reserves memory after HA/buffer "
+                caveat = (f" Note: VCF Ops' capacity engine reserves memory after HA/buffer "
                           f"(engine-free {eng} GB) — this uses raw free headroom.")
             headline = (f"Place the {vcpu} vCPU / {memory_gb:g} GB VM on "
                         f"{rec_host['host']} (cluster {rec_host['cluster']}){loc_txt}. "
