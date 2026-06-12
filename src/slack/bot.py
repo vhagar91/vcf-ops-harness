@@ -79,6 +79,9 @@ def _maybe_start_webhook(app, config, memory, registry, llm_config) -> None:
         error("WEBHOOK_ENABLED but VROPS_ALERT_CHANNEL is empty; not starting webhook listener")
         return
 
+    # app.client is a WebClient (bot-token Web API) independent of the Socket Mode /
+    # HTTP server loop, so publishing works even before/while Slack is connecting —
+    # which is why starting this listener before the blocking Slack start is safe.
     publisher = SlackPublisher(app.client, config.vrops_alert_channel)
 
     def _dispatch(payload):
