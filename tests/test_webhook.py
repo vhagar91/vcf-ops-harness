@@ -190,3 +190,21 @@ def test_process_alert_skips_below_criticality(monkeypatch):
                     _FakeVrops(), memory=None, registry=None, llm_config=None,
                     publisher=pub, min_criticality="CRITICAL")
     assert pub.published == []
+
+
+def test_config_loads_webhook_fields(monkeypatch):
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "x")
+    monkeypatch.setenv("SLACK_SIGNING_SECRET", "y")
+    monkeypatch.setenv("WEBHOOK_ENABLED", "true")
+    monkeypatch.setenv("WEBHOOK_PORT", "9099")
+    monkeypatch.setenv("WEBHOOK_TOKEN", "tok")
+    monkeypatch.setenv("VROPS_ALERT_CHANNEL", "#ops")
+    monkeypatch.setenv("WEBHOOK_MIN_CRITICALITY", "CRITICAL")
+    from src.config.settings import load_config
+    c = load_config()
+    assert c.webhook_enabled is True
+    assert c.webhook_port == 9099
+    assert c.webhook_token == "tok"
+    assert c.webhook_path == "/vrops/alert"
+    assert c.vrops_alert_channel == "#ops"
+    assert c.webhook_min_criticality == "CRITICAL"
